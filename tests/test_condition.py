@@ -33,6 +33,36 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertEqual(server.PRODUCT_IDS["supply_downstream_products"], "68c02b268cc760ff46ee93c3")
         self.assertEqual(server.PRODUCT_IDS["patent_stats"], "66d5b7df537c3f61d646c230")
 
+    def test_bid_search_keeps_json_string_params(self):
+        captured = {}
+        original = server.call_api
+
+        def fake_call_api(product_id, params=None):
+            captured["product_id"] = product_id
+            captured["params"] = params or {}
+            return {"ok": True}
+
+        try:
+            server.call_api = fake_call_api
+            result = server.bid_bigdata_bid_search(
+                matchKeyword="无人机",
+                biddingType='["招标公告"]',
+                biddingRegion='[["广东省"]]',
+                pageIndex=1,
+                pageSize=3,
+            )
+        finally:
+            server.call_api = original
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(captured["product_id"], server.PRODUCT_IDS["bid_search"])
+        self.assertEqual(captured["params"]["biddingType"], '["招标公告"]')
+        self.assertEqual(captured["params"]["biddingRegion"], '[["广东省"]]')
+
+    def test_bid_search_rejects_invalid_json_string_params(self):
+        result = server.bid_bigdata_bid_search(matchKeyword="无人机", biddingType="招标公告")
+        self.assertEqual(result, {"error": "biddingType格式错误，请输入合法JSON字符串"})
+
 
 if __name__ == "__main__":
     unittest.main()

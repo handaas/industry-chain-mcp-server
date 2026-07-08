@@ -65,11 +65,12 @@ def _drop_none(params: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in params.items() if value is not None}
 
 
-def _parse_json_param(value: Optional[str], field_name: str) -> Any:
+def _json_param_error(value: Optional[str], field_name: str) -> Optional[Dict[str, str]]:
     if value is None:
         return None
     try:
-        return json.loads(value)
+        json.loads(value)
+        return None
     except json.JSONDecodeError:
         return {"error": f"{field_name}格式错误，请输入合法JSON字符串"}
 
@@ -469,16 +470,16 @@ def bid_bigdata_bid_search(
     - pageIndex: 页码
     - pageSize: 分页大小，一页最多获取50条
     """
-    parsed_bidding_type = _parse_json_param(biddingType, "biddingType")
-    if isinstance(parsed_bidding_type, dict) and "error" in parsed_bidding_type:
-        return parsed_bidding_type
-    parsed_bidding_region = _parse_json_param(biddingRegion, "biddingRegion")
-    if isinstance(parsed_bidding_region, dict) and "error" in parsed_bidding_region:
-        return parsed_bidding_region
+    bidding_type_error = _json_param_error(biddingType, "biddingType")
+    if bidding_type_error:
+        return bidding_type_error
+    bidding_region_error = _json_param_error(biddingRegion, "biddingRegion")
+    if bidding_region_error:
+        return bidding_region_error
     return call_api(PRODUCT_IDS["bid_search"], _drop_none({
         "matchKeyword": matchKeyword,
-        "biddingType": parsed_bidding_type,
-        "biddingRegion": parsed_bidding_region,
+        "biddingType": biddingType,
+        "biddingRegion": biddingRegion,
         "biddingAnncPubStartTime": biddingAnncPubStartTime,
         "biddingAnncPubEndTime": biddingAnncPubEndTime,
         "searchMode": searchMode,
