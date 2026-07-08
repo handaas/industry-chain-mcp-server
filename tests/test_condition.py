@@ -40,6 +40,32 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertEqual(server.PRODUCT_IDS["supply_downstream_products"], "68c02b268cc760ff46ee93c3")
         self.assertEqual(server.PRODUCT_IDS["patent_stats"], "66d5b7df537c3f61d646c230")
 
+    def test_product_missing_response_includes_product_identity(self):
+        original_credentials = (server.INTEGRATOR_ID, server.SECRET_ID, server.SECRET_KEY)
+        original_post = server.requests.post
+
+        class FakeResponse:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"msgCN": "产品不存在"}
+
+        try:
+            server.INTEGRATOR_ID = "integrator"
+            server.SECRET_ID = "secret-id"
+            server.SECRET_KEY = "secret-key"
+            server.requests.post = lambda *args, **kwargs: FakeResponse()
+            result = server.call_api(server.PRODUCT_IDS["enterprise_business_info"], {"matchKeyword": "广州探迹科技有限公司"})
+        finally:
+            server.INTEGRATOR_ID, server.SECRET_ID, server.SECRET_KEY = original_credentials
+            server.requests.post = original_post
+
+        self.assertEqual(result["error"], "产品不存在")
+        self.assertEqual(result["product_key"], "enterprise_business_info")
+        self.assertEqual(result["product_name"], "企业业务信息查询")
+        self.assertEqual(result["product_id"], "66e55613ae988a28c6db9259")
+
     def test_bid_search_keeps_json_string_params(self):
         captured = {}
         original = server.call_api

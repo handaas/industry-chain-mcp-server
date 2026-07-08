@@ -60,6 +60,41 @@ PRODUCT_IDS = {
     "planned_projects": "66f3d8c064bd2be52d68a134",
 }
 
+PRODUCT_NAMES = {
+    "enterprise_keyword_search": "企业关键词模糊查询",
+    "enterprise_base_info": "企业基础信息查询",
+    "enterprise_profile": "企业简介查询",
+    "enterprise_business_info": "企业业务信息查询",
+    "enterprise_tags": "企业标签信息查询",
+    "enterprise_holder_info": "企业控股股东信息查询",
+    "enterprise_invest_info": "企业对外投资信息查询",
+    "enterprise_branch_info": "企业分支机构信息查询",
+    "enterprise_main_person_info": "企业主要人员信息查询",
+    "supply_downstream_products": "下游产品目录查询",
+    "supply_downstream_enterprises": "下游企业清单查询",
+    "advanced_filter_count": "高级筛选企业数量查询",
+    "advanced_filter_list": "高级筛选企业清单查询",
+    "patent_search": "专利信息搜索",
+    "patent_stats": "企业专利统计分析",
+    "bid_win_stats": "企业中标统计",
+    "bidding_info": "企业招投标信息查询",
+    "tender_stats": "企业招标统计",
+    "procurement_stats": "企业采购统计",
+    "bid_search": "招投标公告搜索",
+    "planned_projects": "企业拟建项目查询",
+}
+
+
+def _product_meta(product_id: str) -> Dict[str, str]:
+    for key, value in PRODUCT_IDS.items():
+        if value == product_id:
+            return {
+                "product_key": key,
+                "product_name": PRODUCT_NAMES.get(key, key),
+                "product_id": product_id,
+            }
+    return {"product_key": "", "product_name": "", "product_id": product_id}
+
 
 def _drop_none(params: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in params.items() if value is not None}
@@ -115,7 +150,17 @@ def call_api(product_id: str, params: Optional[Dict[str, Any]] = None) -> Dict[s
         response = requests.post(url, data=call_params, timeout=DEFAULT_TIMEOUT)
         if response.status_code == 200:
             response_json = response.json()
-            return response_json.get("data", None) or response_json.get("msgCN", None) or response_json
+            data = response_json.get("data", None)
+            if data:
+                return data
+            message = response_json.get("msgCN", None) or response_json.get("msgCn", None) or response_json.get("message", None)
+            if message == "产品不存在":
+                return {
+                    "error": "产品不存在",
+                    "message": "当前本地账号未开通该 HandaaS 商品，或商品 ID 与账号权限不匹配。",
+                    **_product_meta(product_id),
+                }
+            return message or response_json
         return f"接口调用失败，状态码：{response.status_code}"
     except Exception:
         return "查询失败"
