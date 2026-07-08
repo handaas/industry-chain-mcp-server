@@ -10,7 +10,14 @@ from server import mcp_server as server
 
 class ExistingInterfaceWrapperTests(unittest.TestCase):
     def test_missing_credentials_returns_actionable_error(self):
-        result = server.call_api("product-id", {})
+        original = (server.INTEGRATOR_ID, server.SECRET_ID, server.SECRET_KEY)
+        try:
+            server.INTEGRATOR_ID = None
+            server.SECRET_ID = None
+            server.SECRET_KEY = None
+            result = server.call_api("product-id", {})
+        finally:
+            server.INTEGRATOR_ID, server.SECRET_ID, server.SECRET_KEY = original
         self.assertIsInstance(result, dict)
         self.assertIn("error", result)
 
@@ -61,7 +68,32 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
 
     def test_bid_search_rejects_invalid_json_string_params(self):
         result = server.bid_bigdata_bid_search(matchKeyword="无人机", biddingType="招标公告")
-        self.assertEqual(result, {"error": "biddingType格式错误，请输入合法JSON字符串"})
+        self.assertEqual(result, {"error": "biddingType格式错误，请输入合法JSON字符串或JSON数组"})
+
+    def test_bid_search_accepts_array_params_from_mcp_clients(self):
+        captured = {}
+        original = server.call_api
+
+        def fake_call_api(product_id, params=None):
+            captured["product_id"] = product_id
+            captured["params"] = params or {}
+            return {"ok": True}
+
+        try:
+            server.call_api = fake_call_api
+            result = server.bid_bigdata_bid_search(
+                matchKeyword="无人机",
+                biddingType=["招标公告"],
+                biddingRegion=[["广东省"]],
+                pageIndex=1,
+                pageSize=3,
+            )
+        finally:
+            server.call_api = original
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(captured["params"]["biddingType"], '["招标公告"]')
+        self.assertEqual(captured["params"]["biddingRegion"], '[["广东省"]]')
 
 
 if __name__ == "__main__":

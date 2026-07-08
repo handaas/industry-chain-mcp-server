@@ -11,7 +11,7 @@ import json
 import os
 import sys
 from hashlib import md5
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import requests
 from dotenv import load_dotenv
@@ -65,14 +65,24 @@ def _drop_none(params: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in params.items() if value is not None}
 
 
-def _json_param_error(value: Optional[str], field_name: str) -> Optional[Dict[str, str]]:
+def _normalize_json_string_param(value: Any, field_name: str) -> tuple[Optional[str], Optional[Dict[str, str]]]:
     if value is None:
-        return None
-    try:
-        json.loads(value)
-        return None
-    except json.JSONDecodeError:
-        return {"error": f"{field_name}格式错误，请输入合法JSON字符串"}
+        return None, None
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False), None
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None, {"error": f"{field_name}格式错误，请输入合法JSON字符串或JSON数组"}
+        if isinstance(parsed, str):
+            try:
+                json.loads(parsed)
+                return parsed, None
+            except json.JSONDecodeError:
+                return value, None
+        return value, None
+    return None, {"error": f"{field_name}格式错误，请输入合法JSON字符串或JSON数组"}
 
 
 def _signature(call_params: Dict[str, Any], secret_key: str) -> str:
@@ -447,8 +457,8 @@ def bid_bigdata_procurement_stats(matchKeyword: str, keywordType: Optional[str] 
 @mcp.tool()
 def bid_bigdata_bid_search(
     matchKeyword: Optional[str] = None,
-    biddingType: Optional[str] = None,
-    biddingRegion: Optional[str] = None,
+    biddingType: Optional[Union[str, list]] = None,
+    biddingRegion: Optional[Union[str, list]] = None,
     biddingAnncPubStartTime: Optional[str] = None,
     biddingAnncPubEndTime: Optional[str] = None,
     searchMode: Optional[str] = None,
@@ -470,16 +480,16 @@ def bid_bigdata_bid_search(
     - pageIndex: 页码
     - pageSize: 分页大小，一页最多获取50条
     """
-    bidding_type_error = _json_param_error(biddingType, "biddingType")
+    bidding_type, bidding_type_error = _normalize_json_string_param(biddingType, "biddingType")
     if bidding_type_error:
         return bidding_type_error
-    bidding_region_error = _json_param_error(biddingRegion, "biddingRegion")
+    bidding_region, bidding_region_error = _normalize_json_string_param(biddingRegion, "biddingRegion")
     if bidding_region_error:
         return bidding_region_error
     return call_api(PRODUCT_IDS["bid_search"], _drop_none({
         "matchKeyword": matchKeyword,
-        "biddingType": biddingType,
-        "biddingRegion": biddingRegion,
+        "biddingType": bidding_type,
+        "biddingRegion": bidding_region,
         "biddingAnncPubStartTime": biddingAnncPubStartTime,
         "biddingAnncPubEndTime": biddingAnncPubEndTime,
         "searchMode": searchMode,
