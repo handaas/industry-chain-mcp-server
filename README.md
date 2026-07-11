@@ -32,23 +32,41 @@ cd industry-chain-mcp-server
 
 ### 2. 创建虚拟环境&安装依赖
 
+#### macOS / Linux
+
 ```bash
-python -m venv mcp_env && source mcp_env/bin/activate
-pip install -r requirements.txt
+python3 -m venv mcp_env
+source mcp_env/bin/activate
+python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
-开发模式也可以直接安装项目：
+#### Windows PowerShell
 
-```bash
-pip install -e .
+```powershell
+py -3 -m venv mcp_env
+Set-ExecutionPolicy -Scope Process Bypass
+.\mcp_env\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
 ### 3. 环境配置
 
 复制环境变量模板并配置：
 
+#### macOS / Linux
+
 ```bash
 cp .env.example .env
+nano .env
+```
+
+#### Windows PowerShell
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
 ```
 
 编辑 `.env` 文件，配置以下环境变量：
@@ -61,25 +79,50 @@ SECRET_KEY=your_secret_key
 
 ### 4. streamable-http启动服务
 
+#### macOS / Linux
+
 ```bash
 python server/mcp_server.py streamable-http
+```
+
+#### Windows PowerShell
+
+```powershell
+python .\server\mcp_server.py streamable-http
 ```
 
 服务将在 `http://localhost:8000` 启动。
 
 如果 8000 端口已被占用，可以指定本地端口：
 
+macOS / Linux：
+
 ```bash
 MCP_PORT=8011 python server/mcp_server.py streamable-http
+```
+
+Windows PowerShell：
+
+```powershell
+$env:MCP_PORT = "8011"
+python .\server\mcp_server.py streamable-http
 ```
 
 对应 MCP 地址为 `http://127.0.0.1:8011/mcp`。
 
 健康检查：
 
+macOS / Linux：
+
 ```bash
 curl http://127.0.0.1:8011/health
 # 或 /api/health
+```
+
+Windows PowerShell：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8011/health
 ```
 
 健康检查中的 `ok` 表示服务进程可访问，`ready` / `credentials_configured` 表示本地 HandaaS 凭证已经配置；响应不会返回任何凭证内容。
@@ -109,15 +152,29 @@ handaas-industry-chain-mcp streamable-http
 
 ### 设置Cursor / Cherry Studio MCP配置
 
+先查询安装后的命令位置：
+
+macOS / Linux：
+
+```bash
+command -v handaas-industry-chain-mcp
+```
+
+Windows PowerShell：
+
+```powershell
+(Get-Command handaas-industry-chain-mcp).Source
+```
+
+把输出的完整命令路径填入 `command`，不需要手工拼接虚拟环境路径：
+
 ```json
 {
   "mcpServers": {
     "industry-chain-mcp-server": {
-      "command": "uv",
-      "args": ["run", "mcp", "run", "{workdir}/server/mcp_server.py"],
+      "command": "<上一步输出的 handaas-industry-chain-mcp 完整路径>",
+      "args": ["stdio"],
       "env": {
-        "PATH": "{workdir}/mcp_env/bin:$PATH",
-        "PYTHONPATH": "{workdir}/mcp_env",
         "INTEGRATOR_ID": "your_integrator_id",
         "SECRET_ID": "your_secret_id",
         "SECRET_KEY": "your_secret_key"
@@ -150,6 +207,8 @@ handaas-industry-chain-mcp streamable-http
 
 使用官方 Remote MCP 时，Skill 只需要平台 token：
 
+macOS / Linux：
+
 ```bash
 git clone https://github.com/handaas/industry-chain-processing-skill.git
 cd industry-chain-processing-skill
@@ -158,12 +217,48 @@ export INDUSTRY_CHAIN_MCP_TOKEN="<platform-token>"
 python industry-chain-processing/scripts/mcp_client.py list-tools
 ```
 
+Windows PowerShell：
+
+```powershell
+git clone https://github.com/handaas/industry-chain-processing-skill.git
+Set-Location industry-chain-processing-skill
+python -m pip install -r requirements.txt
+$env:INDUSTRY_CHAIN_MCP_TOKEN = "<platform-token>"
+python .\industry-chain-processing\scripts\mcp_client.py list-tools
+```
+
 使用本地 MCP 时，先启动本服务，再给 Skill 设置本地地址：
+
+macOS / Linux：
+
+终端 1（MCP 仓库）：
 
 ```bash
 ./start_mcp_server.sh
+```
+
+终端 2（Skill 仓库）：
+
+```bash
 export INDUSTRY_CHAIN_MCP_URL="http://127.0.0.1:8000/mcp"
-python /path/to/industry-chain-processing-skill/industry-chain-processing/scripts/mcp_client.py list-tools
+cd ../industry-chain-processing-skill
+python industry-chain-processing/scripts/mcp_client.py list-tools
+```
+
+Windows PowerShell：
+
+PowerShell 窗口 1（MCP 仓库）：
+
+```powershell
+python .\server\mcp_server.py streamable-http
+```
+
+PowerShell 窗口 2（Skill 仓库）：
+
+```powershell
+$env:INDUSTRY_CHAIN_MCP_URL = "http://127.0.0.1:8000/mcp"
+Set-Location ..\industry-chain-processing-skill
+python .\industry-chain-processing\scripts\mcp_client.py list-tools
 ```
 
 Remote token 模式不需要在 Skill 中再次配置 `integrator_id`、`secret_id`、`secret_key` 或各个商品 ID。本地 MCP 模式的凭证只保存在本仓库未提交的 `.env` 中。

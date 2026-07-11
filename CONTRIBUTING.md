@@ -4,11 +4,23 @@ Codex and other coding agents must read [AGENTS.md](AGENTS.md) before changing t
 
 ## Development setup
 
+macOS / Linux:
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
 cp .env.example .env
+```
+
+Windows PowerShell:
+
+```powershell
+py -3 -m venv .venv
+Set-ExecutionPolicy -Scope Process Bypass
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e '.[dev]'
+Copy-Item .env.example .env
 ```
 
 Use placeholder credentials for unit tests. Real HandaaS credentials are only

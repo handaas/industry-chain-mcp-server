@@ -202,6 +202,15 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertNotIn("private-key", first)
 
+    def test_readme_documents_macos_linux_and_windows_commands(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("macOS / Linux", readme)
+        self.assertIn("Windows PowerShell", readme)
+        self.assertIn("Activate.ps1", readme)
+        self.assertIn("Invoke-RestMethod", readme)
+        self.assertIn("Get-Command handaas-industry-chain-mcp", readme)
+        self.assertNotIn("{workdir}", readme)
+
     def test_empty_data_is_preserved(self):
         original_credentials = (server.INTEGRATOR_ID, server.SECRET_ID, server.SECRET_KEY)
         original_post = server.requests.post

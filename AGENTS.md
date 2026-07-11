@@ -96,7 +96,7 @@ For integration smoke tests, start a non-conflicting local port and verify tool 
 ```bash
 MCP_PORT=8023 ./start_mcp_server.sh
 INDUSTRY_CHAIN_MCP_URL=http://127.0.0.1:8023/mcp \
-  python /path/to/industry-chain-processing-skill/industry-chain-processing/scripts/mcp_client.py ping
+  python ../industry-chain-processing-skill/industry-chain-processing/scripts/mcp_client.py ping
 ```
 
 Expected tool count is currently 24. No tool name should start with a custom workflow prefix such as `industry_chain_`.
@@ -128,6 +128,7 @@ For transport or tool-contract changes, also run a local Streamable HTTP smoke t
 ## Documentation and release rules
 
 - Keep the README section order compatible with other HandaaS MCP repositories: capabilities, requirements, local setup, stdio, Remote service, Skill integration, tool inventory, use cases, notes, examples, development, license.
+- User setup documentation must provide separate macOS/Linux and Windows PowerShell commands for virtual environments, file copying/editing, environment variables, service startup, health checks, and CLI discovery. Do not publish a single Unix-only configuration path as universal guidance.
 - Keep detailed contribution and security procedures in `CONTRIBUTING.md` and `SECURITY.md`.
 - Tests remain committed to GitHub; they are required by CI. The wheel must not include `.env` or credentials.
 - Commit messages use the repository's Lore decision-record format when the active Codex environment requires it.
