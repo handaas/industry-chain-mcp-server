@@ -1,5 +1,7 @@
 # Contributing
 
+Codex and other coding agents must read [AGENTS.md](AGENTS.md) before changing the tool contract, product registry, runtime configuration, or documentation.
+
 ## Development setup
 
 ```bash
