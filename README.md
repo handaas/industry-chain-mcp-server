@@ -1,6 +1,10 @@
 # 产业链分析服务
 
-[该MCP服务封装产业链分析常用的HandaaS已有数据接口，包括企业大数据、供应链潜客推荐、专利大数据和招投标大数据等，帮助用户进行产业研究、企业发现、供应链拓展、知识产权分析和招投标线索分析。](https://www.handaas.com/)
+[![CI](https://github.com/handaas/industry-chain-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/handaas/industry-chain-mcp-server/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+[该MCP服务封装产业链分析常用的HandaaS已有数据接口，包括企业大数据、供应链潜客推荐、专利大数据、招投标大数据和政策大数据等，帮助用户进行产业研究、企业发现、供应链拓展、知识产权分析、招投标线索分析和区域政策分析。](https://www.handaas.com/)
 
 
 ## 主要功能
@@ -10,6 +14,7 @@
 - 🔗 供应链下游产品与企业查询
 - 📄 专利信息搜索与企业专利统计
 - 📊 招投标信息与采购统计分析
+- 📜 政策搜索、政策详情与企业获批政策项目统计
 - 🧭 高级企业筛选
 
 ## 环境要求
@@ -30,6 +35,12 @@ cd industry-chain-mcp-server
 ```bash
 python -m venv mcp_env && source mcp_env/bin/activate
 pip install -r requirements.txt
+```
+
+开发模式也可以直接安装项目：
+
+```bash
+pip install -e .
 ```
 
 ### 3. 环境配置
@@ -55,6 +66,29 @@ python server/mcp_server.py streamable-http
 ```
 
 服务将在 `http://localhost:8000` 启动。
+
+如果 8000 端口已被占用，可以指定本地端口：
+
+```bash
+MCP_PORT=8011 python server/mcp_server.py streamable-http
+```
+
+对应 MCP 地址为 `http://127.0.0.1:8011/mcp`。
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:8011/health
+# 或 /api/health
+```
+
+健康检查中的 `ok` 表示服务进程可访问，`ready` / `credentials_configured` 表示本地 HandaaS 凭证已经配置；响应不会返回任何凭证内容。
+
+安装为命令后也可以运行：
+
+```bash
+handaas-industry-chain-mcp streamable-http
+```
 
 #### 支持启动方式 stdio 或 sse 或 streamable-http
 
@@ -109,6 +143,30 @@ python server/mcp_server.py streamable-http
 ```
 
 ### 注意：integrator_id、secret_id、secret_key及token需要登录 https://www.handaas.com/ 进行注册开通平台获取
+
+## 与产业链分析 Skill 联动
+
+本仓库只负责把 HandaaS 已有数据产品封装为 MCP 工具。产业链层级拆解、ES 条件生成、企业证据评分、节点挂链和报告渲染由 [`industry-chain-processing-skill`](https://github.com/handaas/industry-chain-processing-skill) 完成，不会在 MCP 中重复注册工作流工具。
+
+使用官方 Remote MCP 时，Skill 只需要平台 token：
+
+```bash
+git clone https://github.com/handaas/industry-chain-processing-skill.git
+cd industry-chain-processing-skill
+python -m pip install -r requirements.txt
+export INDUSTRY_CHAIN_MCP_TOKEN="<platform-token>"
+python industry-chain-processing/scripts/mcp_client.py list-tools
+```
+
+使用本地 MCP 时，先启动本服务，再给 Skill 设置本地地址：
+
+```bash
+./start_mcp_server.sh
+export INDUSTRY_CHAIN_MCP_URL="http://127.0.0.1:8000/mcp"
+python /path/to/industry-chain-processing-skill/industry-chain-processing/scripts/mcp_client.py list-tools
+```
+
+Remote token 模式不需要在 Skill 中再次配置 `integrator_id`、`secret_id`、`secret_key` 或各个商品 ID。本地 MCP 模式的凭证只保存在本仓库未提交的 `.env` 中。
 
 
 ## 可用工具
@@ -455,6 +513,40 @@ python server/mcp_server.py streamable-http
 - `total`: 总数
 - `resultList`: 拟建项目列表
 
+### 22. policy_bigdata_policy_search
+**功能**: 政策搜索
+
+根据关键词、政策类型、发布机构、地区和发布时间，搜索政策法规、申报指南或公示公告。
+
+**参数**:
+- `matchKeyword` (必需): 政策关键词，例如“智能网联汽车”“自动驾驶”“低空经济”“机器人”
+- `pnType` (可选): 全部 / 申报指南 / 公示公开 / 其他政策
+- `agency` (可选): 发布机构
+- `address` (可选): 地区，支持 `[["福建省"],["贵州省","安顺市","平坝县"]]`、`"广东省"`、`"广东省,深圳市"`、`"国家部委"`、`"北京/上海/天津/重庆"`
+- `policyPubStartTime` / `policyPubEndTime` (可选): 发布时间范围，格式 `yyyy-mm-dd`
+- `pageSize` / `pageIndex` (可选): 分页参数
+
+**返回值**:
+- `total`: 总数
+- `resultList`: 政策列表，通常包含 `pnId`、`pnTitle`、`pnAgency`、`pnType`、`pnPublishDate`、`pnRegion`、`pnText`
+
+### 23. policy_bigdata_policy_info
+**功能**: 政策详情查询
+
+根据政策 ID 查询政策详情，包括发布机构、正文、原文链接、附件、关联项目、资助金额和申报时间等。
+
+**参数**:
+- `matchKeyword` (必需): 政策 ID
+
+### 24. policy_bigdata_approved_project_stats
+**功能**: 企业获批政策项目统计
+
+根据企业名称、注册号、统一社会信用代码或企业 ID，查询企业获批国家/省/市/区各级政策项目、主管机构、补贴金额和年度趋势。
+
+**参数**:
+- `matchKeyword` (必需): 企业名称/注册号/统一社会信用代码/企业id
+- `keywordType` (可选): `name`、`nameId`、`regNumber`、`socialCreditCode`
+
 ## 使用场景
 
 1. **产业研究**: 使用企业搜索、企业业务信息和企业标签识别产业链相关企业
@@ -462,13 +554,14 @@ python server/mcp_server.py streamable-http
 3. **招商线索挖掘**: 结合高级筛选、企业标签、供应链企业清单发现潜在招商对象
 4. **技术与创新分析**: 查询企业专利信息和专利统计，评估企业技术储备
 5. **项目与采购分析**: 查询招投标、拟建项目和采购统计，判断企业项目活跃度
-6. **企业画像补全**: 查询工商、简介、业务、股东、投资、分支机构和主要人员信息
+6. **区域政策分析**: 查询某产业在国家部委和各省市的政策法规、申报指南、公示公告，对比支持方向和政策强度
+7. **企业画像补全**: 查询工商、简介、业务、股东、投资、分支机构、主要人员和获批政策项目统计
 
 ## 使用注意事项
 
 1. **企业全称要求**: 在调用需要企业全称的接口时，如果没有企业全称则先调用企业关键词模糊查询接口获取企业全称或企业ID
 2. **分页限制**: 列表类接口通常一页最多获取50条数据，高级筛选企业清单一页最大10条、最多返回500条
-3. **JSON参数格式**: `bid_bigdata_bid_search` 的 `biddingType`、`biddingRegion` 需要传入合法JSON字符串
+3. **JSON参数格式**: `bid_bigdata_bid_search` 的 `biddingType`、`biddingRegion` 支持 JSON 数组或合法 JSON 字符串；错误会返回具体工具、产品和字段
 4. **Remote优先**: 推荐使用官方Remote服务，客户端只需要配置平台token
 5. **凭证安全**: 本地启动时不要提交 `.env`、secret_id、secret_key 或签名
 6. **接口权限**: 可用数据取决于账号已开通的数据产品权限
@@ -515,3 +608,31 @@ python server/mcp_server.py streamable-http
 1. 搜索标题包含“无人机”的中标公告
 2. 查询广东省最近发布的低空经济招标公告
 3. 查找项目金额大于1000万元的数据中心招标项目
+
+### policy_bigdata_policy_search (政策搜索)
+1. 查询国家部委和广东省最近发布的“智能网联汽车”相关政策
+2. 对比北京、上海、江苏、广东在“自动驾驶”方向的政策重点
+3. 搜索“低空经济”相关申报指南和公示公告
+
+### policy_bigdata_approved_project_stats (企业获批政策项目统计)
+1. 查询某企业近年获批政策项目数量和补贴金额趋势
+2. 分析某企业政策项目主要来自哪些主管机构
+
+## 开发与测试
+
+不需要真实凭证即可运行单元测试：
+
+```bash
+python -m pip install -e '.[dev]'
+python -m unittest discover -s tests -v
+python -m py_compile server/*.py
+python -m build
+```
+
+真实接口联调前，请确认 `.env` 只保存在本地，并从最小 `pageSize` 开始测试。项目 CI 会在 Python 3.10 和 3.12 上执行测试。
+
+贡献说明见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题处理方式见 [SECURITY.md](SECURITY.md)。
+
+## License
+
+[MIT](LICENSE)

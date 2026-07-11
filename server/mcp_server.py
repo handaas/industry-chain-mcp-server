@@ -7,6 +7,8 @@ or planning tools.
 """
 from __future__ import annotations
 
+import argparse
+import asyncio
 import json
 import os
 import sys
@@ -16,21 +18,45 @@ from typing import Any, Dict, Optional, Union
 import requests
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 load_dotenv()
 
 DESCRIPTION = """
-该MCP服务提供产业链分析相关的HandaaS数据接口封装，包括企业关键词搜索、企业基础信息、供应链下游产品与企业、专利信息、招投标信息和高级企业筛选等。
+该MCP服务提供产业链分析相关的HandaaS数据接口封装，包括企业关键词搜索、企业基础信息、供应链下游产品与企业、专利信息、招投标信息、政策大数据和高级企业筛选等。
 所有可用工具均为HandaaS已有数据接口的MCP封装。
 """
-
-mcp = FastMCP("HANDAAS产业链分析服务", instructions=DESCRIPTION, dependencies=["python-dotenv", "requests"])
 
 INTEGRATOR_ID = os.environ.get("INTEGRATOR_ID")
 SECRET_ID = os.environ.get("SECRET_ID")
 SECRET_KEY = os.environ.get("SECRET_KEY")
 DAAS_BASE_URL = os.environ.get("DAAS_BASE_URL", "https://console.handaas.com").rstrip("/")
 DEFAULT_TIMEOUT = int(os.environ.get("HANDAAS_TIMEOUT", "30"))
+MCP_HOST = os.environ.get("MCP_HOST") or os.environ.get("HANDAAS_MCP_HOST") or "127.0.0.1"
+MCP_PORT = int(os.environ.get("MCP_PORT") or os.environ.get("HANDAAS_MCP_PORT") or "8000")
+
+mcp = FastMCP(
+    "HANDAAS产业链分析服务",
+    instructions=DESCRIPTION,
+    dependencies=["python-dotenv", "requests"],
+    host=MCP_HOST,
+    port=MCP_PORT,
+)
+
+
+@mcp.custom_route("/health", methods=["GET"])
+@mcp.custom_route("/api/health", methods=["GET"])
+async def health_check(_: Request) -> JSONResponse:
+    """Credential-free readiness endpoint for local and hosted deployments."""
+    return JSONResponse({
+        "ok": True,
+        "ready": bool(INTEGRATOR_ID and SECRET_ID and SECRET_KEY),
+        "service": "handaas-industry-chain-mcp-server",
+        "mcp_path": "/mcp",
+        "tool_count": len(PRODUCT_IDS),
+        "credentials_configured": bool(INTEGRATOR_ID and SECRET_ID and SECRET_KEY),
+    })
 
 PRODUCT_IDS = {
     # 企业大数据服务
@@ -58,6 +84,10 @@ PRODUCT_IDS = {
     "procurement_stats": "6725e5b9ba65854594baebbc",
     "bid_search": "66bf124bf134a4c21b4fc34c",
     "planned_projects": "66f3d8c064bd2be52d68a134",
+    # 政策大数据服务
+    "policy_approved_project_stats": "66c702b725f04ab44cd24c9c",
+    "policy_info": "66c702b725f04ab44cd24cd6",
+    "policy_search": "66c702b725f04ab44cd24ceb",
 }
 
 PRODUCT_NAMES = {
@@ -82,6 +112,9 @@ PRODUCT_NAMES = {
     "procurement_stats": "企业采购统计",
     "bid_search": "招投标公告搜索",
     "planned_projects": "企业拟建项目查询",
+    "policy_approved_project_stats": "企业获批政策项目统计",
+    "policy_info": "政策详情查询",
+    "policy_search": "政策搜索",
 }
 
 
@@ -98,6 +131,31 @@ def _product_meta(product_id: str) -> Dict[str, str]:
 
 def _drop_none(params: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in params.items() if value is not None}
+
+
+def _normalize_pagination(
+    product_id: str,
+    page_index: int,
+    page_size: int,
+    *,
+    max_page_size: int = 50,
+) -> tuple[Optional[Dict[str, int]], Optional[Dict[str, Any]]]:
+    """Validate paging and cap page size to the upstream product limit."""
+    if isinstance(page_index, bool) or not isinstance(page_index, int) or page_index < 1:
+        return None, _api_error(
+            product_id,
+            "参数错误",
+            "pageIndex 必须是从 1 开始的整数。",
+            field="pageIndex",
+        )
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1:
+        return None, _api_error(
+            product_id,
+            "参数错误",
+            f"pageSize 必须是 1-{max_page_size} 的整数。",
+            field="pageSize",
+        )
+    return {"pageIndex": page_index, "pageSize": min(page_size, max_page_size)}, None
 
 
 def _normalize_json_string_param(value: Any, field_name: str) -> tuple[Optional[str], Optional[Dict[str, str]]]:
@@ -120,23 +178,59 @@ def _normalize_json_string_param(value: Any, field_name: str) -> tuple[Optional[
     return None, {"error": f"{field_name}格式错误，请输入合法JSON字符串或JSON数组"}
 
 
+def _normalize_policy_address_param(value: Any) -> tuple[Optional[str], Optional[Dict[str, str]]]:
+    """Normalize policy address to HandaaS list-of-list JSON string.
+
+    Accepts [["广东省"], ["上海"]], a JSON string, "广东省", "广东省,深圳市",
+    "国家部委", or one of the municipalities.
+    """
+    if value is None or value == "":
+        return None, None
+    if isinstance(value, list):
+        return json.dumps(value, ensure_ascii=False), None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None, None
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                return None, {"error": "address格式错误，请输入list of list JSON，例如：[[\"福建省\"],[\"贵州省\",\"安顺市\",\"平坝县\"]]"}
+            if not isinstance(parsed, list):
+                return None, {"error": "address格式错误，顶层必须是list"}
+            return json.dumps(parsed, ensure_ascii=False), None
+        parts = [part.strip() for part in raw.replace("，", ",").split(",") if part.strip()]
+        return json.dumps([parts or [raw]], ensure_ascii=False), None
+    return None, {"error": "address格式错误，请输入list、JSON字符串或地区名称"}
+
+
 def _signature(call_params: Dict[str, Any], secret_key: str) -> str:
     material = "".join(str(call_params[key]) for key in sorted(call_params)) + secret_key
     return md5(material.encode("utf-8")).hexdigest()
 
 
-def call_api(product_id: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any] | str:
+def _api_error(product_id: str, error: str, message: str, **details: Any) -> Dict[str, Any]:
+    return {
+        "error": error,
+        "message": message,
+        **_product_meta(product_id),
+        **details,
+    }
+
+
+def call_api(product_id: str, params: Optional[Dict[str, Any]] = None) -> Any:
     """Call a HandaaS data product by product_id."""
     if params is None:
         params = {}
     if not INTEGRATOR_ID:
-        return {"error": "对接器ID不能为空"}
+        return _api_error(product_id, "配置缺失", "INTEGRATOR_ID 未配置。", field="INTEGRATOR_ID")
     if not SECRET_ID:
-        return {"error": "密钥ID不能为空"}
+        return _api_error(product_id, "配置缺失", "SECRET_ID 未配置。", field="SECRET_ID")
     if not SECRET_KEY:
-        return {"error": "密钥不能为空"}
+        return _api_error(product_id, "配置缺失", "SECRET_KEY 未配置。", field="SECRET_KEY")
     if not product_id:
-        return {"error": "产品ID不能为空"}
+        return _api_error(product_id, "参数错误", "产品 ID 不能为空。", field="product_id")
 
     call_params: Dict[str, Any] = {
         "product_id": product_id,
@@ -149,21 +243,32 @@ def call_api(product_id: str, params: Optional[Dict[str, Any]] = None) -> Dict[s
     try:
         response = requests.post(url, data=call_params, timeout=DEFAULT_TIMEOUT)
         if response.status_code == 200:
-            response_json = response.json()
-            data = response_json.get("data", None)
-            if data:
-                return data
+            try:
+                response_json = response.json()
+            except ValueError:
+                return _api_error(product_id, "响应解析失败", "HandaaS 返回了非 JSON 响应。")
+            if not isinstance(response_json, dict):
+                return _api_error(product_id, "响应格式错误", "HandaaS 响应顶层不是 JSON object。")
+            if "data" in response_json and response_json.get("data") is not None:
+                return response_json["data"]
             message = response_json.get("msgCN", None) or response_json.get("msgCn", None) or response_json.get("message", None)
             if message == "产品不存在":
-                return {
-                    "error": "产品不存在",
-                    "message": "当前本地账号未开通该 HandaaS 商品，或商品 ID 与账号权限不匹配。",
-                    **_product_meta(product_id),
-                }
-            return message or response_json
-        return f"接口调用失败，状态码：{response.status_code}"
-    except Exception:
-        return "查询失败"
+                return _api_error(product_id, "产品不存在", "当前本地账号未开通该 HandaaS 商品，或商品 ID 与账号权限不匹配。")
+            if message:
+                return _api_error(product_id, str(message), "HandaaS 接口未返回数据。")
+            return response_json
+        return _api_error(
+            product_id,
+            "接口调用失败",
+            f"HandaaS 返回 HTTP {response.status_code}。",
+            status_code=response.status_code,
+        )
+    except requests.Timeout:
+        return _api_error(product_id, "请求超时", f"HandaaS 接口在 {DEFAULT_TIMEOUT} 秒内未响应。")
+    except requests.RequestException as exc:
+        return _api_error(product_id, "网络请求失败", f"无法连接 HandaaS：{exc.__class__.__name__}。")
+    except Exception as exc:  # pragma: no cover - defensive boundary
+        return _api_error(product_id, "查询失败", f"未预期的调用异常：{exc.__class__.__name__}。")
 
 
 @mcp.tool()
@@ -176,10 +281,13 @@ def enterprise_get_keyword_search(matchKeyword: str, pageIndex: int = 1, pageSiz
     - pageIndex: 页码，从1开始
     - pageSize: 分页大小，一页最多获取50条数据
     """
-    return call_api(PRODUCT_IDS["enterprise_keyword_search"], _drop_none({
+    product_id = PRODUCT_IDS["enterprise_keyword_search"]
+    page, error = _normalize_pagination(product_id, pageIndex, pageSize)
+    if error:
+        return error
+    return call_api(product_id, _drop_none({
         "matchKeyword": matchKeyword,
-        "pageIndex": pageIndex,
-        "pageSize": pageSize,
+        **(page or {}),
     }))
 
 
@@ -254,11 +362,14 @@ def enterprise_get_enterprise_invest_info(matchKeyword: str, keywordType: Option
     - pageIndex: 页码，从1开始
     - pageSize: 分页大小
     """
-    return call_api(PRODUCT_IDS["enterprise_invest_info"], _drop_none({
+    product_id = PRODUCT_IDS["enterprise_invest_info"]
+    page, error = _normalize_pagination(product_id, pageIndex, pageSize)
+    if error:
+        return error
+    return call_api(product_id, _drop_none({
         "matchKeyword": matchKeyword,
         "keywordType": keywordType,
-        "pageIndex": pageIndex,
-        "pageSize": pageSize,
+        **(page or {}),
     }))
 
 
@@ -273,11 +384,14 @@ def enterprise_get_enterprise_branch_info(matchKeyword: str, keywordType: Option
     - pageIndex: 页码，从1开始
     - pageSize: 分页大小
     """
-    return call_api(PRODUCT_IDS["enterprise_branch_info"], _drop_none({
+    product_id = PRODUCT_IDS["enterprise_branch_info"]
+    page, error = _normalize_pagination(product_id, pageIndex, pageSize)
+    if error:
+        return error
+    return call_api(product_id, _drop_none({
         "matchKeyword": matchKeyword,
         "keywordType": keywordType,
-        "pageIndex": pageIndex,
-        "pageSize": pageSize,
+        **(page or {}),
     }))
 
 
@@ -292,11 +406,14 @@ def enterprise_get_enterprise_main_person_info(matchKeyword: str, keywordType: O
     - pageIndex: 页码，从1开始
     - pageSize: 分页大小
     """
-    return call_api(PRODUCT_IDS["enterprise_main_person_info"], _drop_none({
+    product_id = PRODUCT_IDS["enterprise_main_person_info"]
+    page, error = _normalize_pagination(product_id, pageIndex, pageSize)
+    if error:
+        return error
+    return call_api(product_id, _drop_none({
         "matchKeyword": matchKeyword,
         "keywordType": keywordType,
-        "pageIndex": pageIndex,
-        "pageSize": pageSize,
+        **(page or {}),
     }))
 
 
@@ -345,7 +462,11 @@ def supply_get_down_stream_enterprises(
     - pageIndex: 页码，从1开始
     - pageSize: 分页大小
     """
-    return call_api(PRODUCT_IDS["supply_downstream_enterprises"], _drop_none({
+    product_id = PRODUCT_IDS["supply_downstream_enterprises"]
+    page, error = _normalize_pagination(product_id, pageIndex, pageSize)
+    if error:
+        return error
+    return call_api(product_id, _drop_none({
         "keywords": keywords,
         "mainProducts": mainProducts,
         "isForeignTrade": isForeignTrade,
@@ -362,8 +483,7 @@ def supply_get_down_stream_enterprises(
         "hasPack": hasPack,
         "regCapitalMin": regCapitalMin,
         "regCapitalMax": regCapitalMax,
-        "pageIndex": pageIndex,
-        "pageSize": pageSize,
+        **(page or {}),
     }))
 
 
@@ -396,7 +516,25 @@ def advanced_filter_get_enterprise_count(
     - regCapitalRmbGte/regCapitalRmbLte: 注册资本范围，单位万元
     - totalPayAmountGte/totalPayAmountLte: 实缴资本范围，单位万元
     """
-    return call_api(PRODUCT_IDS["advanced_filter_count"], _drop_none(locals()))
+    product_id = PRODUCT_IDS["advanced_filter_count"]
+    page, error = _normalize_pagination(product_id, pageIndex, pageSize, max_page_size=10)
+    if error:
+        return error
+    params = _drop_none({
+        "operStatus": operStatus,
+        "address": address,
+        "industries": industries,
+        "enterpriseType": enterpriseType,
+        "name": name,
+        "foundTimeGte": foundTimeGte,
+        "foundTimeLte": foundTimeLte,
+        "regCapitalRmbGte": regCapitalRmbGte,
+        "regCapitalRmbLte": regCapitalRmbLte,
+        "totalPayAmountGte": totalPayAmountGte,
+        "totalPayAmountLte": totalPayAmountLte,
+        **(page or {}),
+    })
+    return call_api(product_id, params)
 
 
 @mcp.tool()
@@ -420,7 +558,25 @@ def advanced_filter_get_enterprise_list(
 
     请求参数同 advanced_filter_get_enterprise_count。
     """
-    return call_api(PRODUCT_IDS["advanced_filter_list"], _drop_none(locals()))
+    product_id = PRODUCT_IDS["advanced_filter_list"]
+    page, error = _normalize_pagination(product_id, pageIndex, pageSize, max_page_size=10)
+    if error:
+        return error
+    params = _drop_none({
+        "operStatus": operStatus,
+        "address": address,
+        "industries": industries,
+        "enterpriseType": enterpriseType,
+        "name": name,
+        "foundTimeGte": foundTimeGte,
+        "foundTimeLte": foundTimeLte,
+        "regCapitalRmbGte": regCapitalRmbGte,
+        "regCapitalRmbLte": regCapitalRmbLte,
+        "totalPayAmountGte": totalPayAmountGte,
+        "totalPayAmountLte": totalPayAmountLte,
+        **(page or {}),
+    })
+    return call_api(product_id, params)
 
 
 @mcp.tool()
@@ -441,12 +597,15 @@ def patent_bigdata_patent_search(
     - keywordType: 专利名称、申请号/公开号、申请人、代理机构
     - pageIndex: 页码，从1开始
     """
-    return call_api(PRODUCT_IDS["patent_search"], _drop_none({
+    product_id = PRODUCT_IDS["patent_search"]
+    page, error = _normalize_pagination(product_id, pageIndex, pageSize)
+    if error:
+        return error
+    return call_api(product_id, _drop_none({
         "matchKeyword": matchKeyword,
-        "pageSize": pageSize,
         "patentType": patentType,
         "keywordType": keywordType,
-        "pageIndex": pageIndex,
+        **(page or {}),
     }))
 
 
@@ -475,11 +634,14 @@ def bid_bigdata_bidding_info(matchKeyword: str, pageSize: int = 10, keywordType:
     """
     查询企业参与的招投标信息。
     """
-    return call_api(PRODUCT_IDS["bidding_info"], _drop_none({
+    product_id = PRODUCT_IDS["bidding_info"]
+    page, error = _normalize_pagination(product_id, pageIndex, pageSize)
+    if error:
+        return error
+    return call_api(product_id, _drop_none({
         "matchKeyword": matchKeyword,
-        "pageSize": pageSize,
         "keywordType": keywordType,
-        "pageIndex": pageIndex,
+        **(page or {}),
     }))
 
 
@@ -525,13 +687,17 @@ def bid_bigdata_bid_search(
     - pageIndex: 页码
     - pageSize: 分页大小，一页最多获取50条
     """
+    product_id = PRODUCT_IDS["bid_search"]
+    page, page_error = _normalize_pagination(product_id, pageIndex, pageSize)
+    if page_error:
+        return page_error
     bidding_type, bidding_type_error = _normalize_json_string_param(biddingType, "biddingType")
     if bidding_type_error:
-        return bidding_type_error
+        return _api_error(product_id, "参数错误", bidding_type_error["error"], field="biddingType")
     bidding_region, bidding_region_error = _normalize_json_string_param(biddingRegion, "biddingRegion")
     if bidding_region_error:
-        return bidding_region_error
-    return call_api(PRODUCT_IDS["bid_search"], _drop_none({
+        return _api_error(product_id, "参数错误", bidding_region_error["error"], field="biddingRegion")
+    return call_api(product_id, _drop_none({
         "matchKeyword": matchKeyword,
         "biddingType": bidding_type,
         "biddingRegion": bidding_region,
@@ -541,8 +707,7 @@ def bid_bigdata_bid_search(
         "biddingProjectMaxAmount": biddingProjectMaxAmount,
         "biddingPurchasingType": biddingPurchasingType,
         "biddingProjectMinAmount": biddingProjectMinAmount,
-        "pageIndex": pageIndex,
-        "pageSize": pageSize,
+        **(page or {}),
     }))
 
 
@@ -551,27 +716,110 @@ def bid_bigdata_planned_projects(matchKeyword: str, pageIndex: int = 1, pageSize
     """
     查询企业拟建公告信息。
     """
-    return call_api(PRODUCT_IDS["planned_projects"], _drop_none({
+    product_id = PRODUCT_IDS["planned_projects"]
+    page, error = _normalize_pagination(product_id, pageIndex, pageSize)
+    if error:
+        return error
+    return call_api(product_id, _drop_none({
         "matchKeyword": matchKeyword,
-        "pageIndex": pageIndex,
-        "pageSize": pageSize,
+        "keywordType": keywordType,
+        **(page or {}),
+    }))
+
+
+@mcp.tool()
+def policy_bigdata_approved_project_stats(matchKeyword: str, keywordType: Optional[str] = None) -> dict:
+    """
+    查询企业获批政策项目统计，用于了解企业获得国家/省/市/区各级政策项目、主管机构、补贴金额和年度趋势。
+
+    请求参数:
+    - matchKeyword: 企业名称/注册号/统一社会信用代码/企业id；如果没有企业全称，可先用 enterprise_get_keyword_search 查询。
+    - keywordType: name、nameId、regNumber、socialCreditCode。
+    """
+    return call_api(PRODUCT_IDS["policy_approved_project_stats"], _drop_none({
+        "matchKeyword": matchKeyword,
         "keywordType": keywordType,
     }))
 
 
-if __name__ == "__main__":
+@mcp.tool()
+def policy_bigdata_policy_info(matchKeyword: str) -> dict:
+    """
+    根据政策ID查询政策详情，包括发布机构、正文、原文链接、附件、关联项目、资助金额和申报时间等。
+
+    请求参数:
+    - matchKeyword: 政策ID。
+    """
+    return call_api(PRODUCT_IDS["policy_info"], {"matchKeyword": matchKeyword})
+
+
+@mcp.tool()
+def policy_bigdata_policy_search(
+    matchKeyword: str,
+    pnType: str = "全部",
+    agency: Optional[str] = None,
+    address: Optional[Union[str, list]] = None,
+    policyPubStartTime: Optional[str] = None,
+    policyPubEndTime: Optional[str] = None,
+    pageSize: int = 10,
+    pageIndex: int = 1,
+) -> dict:
+    """
+    搜索政策法规、申报指南或公示公告，可按关键词、政策类型、发布机构、地区和发布时间筛选。
+
+    请求参数:
+    - matchKeyword: 政策关键词，例如“智能网联汽车”“自动驾驶”“低空经济”“机器人”。
+    - pnType: 政策类型，枚举：全部、申报指南、公示公开、其他政策。
+    - agency: 发布机构。
+    - address: 地区，支持 list/list JSON/地区字符串。示例：[["福建省"],["贵州省","安顺市","平坝县"]]；国家政策输入“国家部委”；直辖市输入“北京/上海/天津/重庆”。
+    - policyPubStartTime/policyPubEndTime: 发布时间范围，格式 yyyy-mm-dd。
+    - pageSize: 分页大小，一页最多50条。
+    - pageIndex: 页码，从1开始。
+    """
+    product_id = PRODUCT_IDS["policy_search"]
+    page, page_error = _normalize_pagination(product_id, pageIndex, pageSize)
+    if page_error:
+        return page_error
+    normalized_address, address_error = _normalize_policy_address_param(address)
+    if address_error:
+        return _api_error(product_id, "参数错误", address_error["error"], field="address")
+    return call_api(product_id, _drop_none({
+        "matchKeyword": matchKeyword,
+        "pnType": pnType,
+        "agency": agency,
+        "address": normalized_address,
+        "policyPubStartTime": policyPubStartTime,
+        "policyPubEndTime": policyPubEndTime,
+        **(page or {}),
+    }))
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="HandaaS 产业链分析 MCP 服务")
+    parser.add_argument(
+        "transport",
+        nargs="?",
+        default="stdio",
+        choices=["stdio", "sse", "streamable-http"],
+        help="MCP transport，默认 stdio",
+    )
+    args = parser.parse_args(argv)
     print("正在启动MCP服务...", file=sys.stderr)
-    start_type = sys.argv[1] if len(sys.argv) > 1 else "stdio"
+    start_type = args.transport
     print(f"启动方式: {start_type}", file=sys.stderr)
-    if start_type == "stdio":
-        print("正在使用stdio方式启动MCP服务器...", file=sys.stderr)
-        mcp.run(transport="stdio")
-    elif start_type == "sse":
-        print("正在使用sse方式启动MCP服务器...", file=sys.stderr)
-        mcp.run(transport="sse")
-    elif start_type == "streamable-http":
-        print("正在使用streamable-http方式启动MCP服务器...", file=sys.stderr)
-        mcp.run(transport="streamable-http")
-    else:
-        print("请输入正确的启动方式: stdio 或 sse 或 streamable-http", file=sys.stderr)
-        raise SystemExit(1)
+    try:
+        if start_type == "stdio":
+            print("正在使用stdio方式启动MCP服务器...", file=sys.stderr)
+            mcp.run(transport="stdio")
+        elif start_type == "sse":
+            print("正在使用sse方式启动MCP服务器...", file=sys.stderr)
+            mcp.run(transport="sse")
+        elif start_type == "streamable-http":
+            print("正在使用streamable-http方式启动MCP服务器...", file=sys.stderr)
+            mcp.run(transport="streamable-http")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("MCP服务已停止。", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
