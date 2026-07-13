@@ -38,3 +38,6 @@ handaas-industry-chain-mcp = "server.mcp_server:main"
 
 [tool.setuptools.packages.find]
 include = ["server*"]
+
+[tool.setuptools.package-data]
+"server.config" = ["*.json"]

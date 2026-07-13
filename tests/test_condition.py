@@ -1,6 +1,7 @@
 import asyncio
 import json
 import pathlib
+import subprocess
 import sys
 import unittest
 
@@ -8,6 +9,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from server import mcp_server as server  # noqa: E402
+from server import high_screen  # noqa: E402
 
 
 class ExistingInterfaceWrapperTests(unittest.TestCase):
@@ -55,6 +57,17 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertEqual(server.PRODUCT_IDS["advanced_filter_condition_list"], "690dcb1b9c9dc8d0ff3c40eb")
         self.assertEqual(server.PRODUCT_IDS["patent_stats"], "66d5b7df537c3f61d646c230")
         self.assertEqual(server.PRODUCT_IDS["policy_search"], "66c702b725f04ab44cd24ceb")
+
+    def test_bundled_high_screen_config_has_field_descriptions_and_options(self):
+        config = high_screen.load_field_config()
+        options = high_screen.load_option_config()
+        self.assertEqual(config["platform_config_version"], "0.14.3")
+        self.assertEqual(len(config["fields"]), 369)
+        self.assertEqual(config["fields"]["address"]["label"], "注册地址")
+        self.assertEqual(config["fields"]["address"]["input"]["options_from"], "addressV2")
+        self.assertEqual(config["fields"]["businessKeywords"]["input"]["maxKeywordLength"], 10)
+        self.assertIn("广东", {path[0] for path in high_screen.option_paths("addressV2")})
+        self.assertIn("industriesV2", options["options"])
 
     def test_product_missing_response_includes_product_identity(self):
         original_credentials = (server.INTEGRATOR_ID, server.SECRET_ID, server.SECRET_KEY)
@@ -271,19 +284,44 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         })
         self.assertEqual(result["error"], "参数错误")
         self.assertEqual(result["field"], "filter")
-        self.assertIn("省级简称", result["message"])
+        self.assertIn("不在配置版本", result["message"])
 
-    def test_high_screen_rejects_wrong_operators_for_address_fields(self):
-        tree_error = server.advanced_filter_get_enterprise_list(filter={
-            "must": [{"address": [{"in": ["广东"]}]}],
+    def test_high_screen_safely_corrects_operator_and_value_shapes_from_config(self):
+        product_id = server.PRODUCT_IDS["advanced_filter_condition_list"]
+        value, error = server._normalize_high_screen_filter(product_id, {
+            "must": [
+                {"address": [{"in": ["广东省", "深圳市"]}]},
+                {"addressValue": [{"eq": "南山区"}]},
+                {"operStatus_v2": [{"in": ["营业", "吊销"]}]},
+                {"hasMobile": [{"exist": True}]},
+            ]
         })
-        detail_error = server.advanced_filter_get_enterprise_list(filter={
-            "must": [{"addressValue": [{"eq": "南山区"}]}],
+        self.assertIsNone(error)
+        parsed = json.loads(value)
+        self.assertEqual(parsed["must"][0], {"address": [{"eq": [["广东", "深圳市"]]}]})
+        self.assertEqual(parsed["must"][1], {"addressValue": [{"in": ["南山区"]}]})
+        self.assertEqual(parsed["must"][2], {"operStatus_v2": [{"eq": [["营业"], ["吊销"]]}]})
+        self.assertEqual(parsed["must"][3], {"hasMobile": [{"exist": "1"}]})
+
+    def test_high_screen_rejects_unknown_field_with_suggestion(self):
+        result = server.advanced_filter_get_enterprise_list(filter={
+            "must": [{"businessKeyword": [{"in": ["机器人"]}]}],
         })
-        self.assertEqual(tree_error["error"], "参数错误")
-        self.assertIn("只支持 eq/neq", tree_error["message"])
-        self.assertEqual(detail_error["error"], "参数错误")
-        self.assertIn("只支持 in/nin", detail_error["message"])
+        self.assertEqual(result["error"], "参数错误")
+        self.assertIn("未知高筛字段", result["message"])
+        self.assertIn("businessKeywords", result["message"])
+
+    def test_high_screen_enforces_configured_keyword_and_numeric_limits(self):
+        too_many_keywords = server.advanced_filter_get_enterprise_list(filter={
+            "must": [{"businessKeywords": [{"in": [f"关键词{i}" for i in range(11)]}]}],
+        })
+        below_minimum = server.advanced_filter_get_enterprise_list(filter={
+            "must": [{"regCapitalRmb": [{"gte": 0}]}],
+        })
+        self.assertEqual(too_many_keywords["error"], "参数错误")
+        self.assertIn("最多允许 10 个关键词", too_many_keywords["message"])
+        self.assertEqual(below_minimum["error"], "参数错误")
+        self.assertIn("配置下限 1", below_minimum["message"])
 
     def test_high_screen_rejects_ignored_must_not_without_calling_upstream(self):
         original = server.call_api
@@ -313,7 +351,7 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertEqual(wrapped["error"], "参数错误")
         self.assertIn("包装层", wrapped["message"])
         self.assertEqual(unsupported["error"], "参数错误")
-        self.assertIn("不支持操作符", unsupported["message"])
+        self.assertIn("不支持 match", unsupported["message"])
 
     def test_high_screen_rejects_mixed_flat_and_condition_modes(self):
         result = server.advanced_filter_get_enterprise_list(
@@ -371,6 +409,25 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertIn("Invoke-RestMethod", readme)
         self.assertIn("Get-Command handaas-industry-chain-mcp", readme)
         self.assertNotIn("{workdir}", readme)
+
+    def test_package_includes_bundled_high_screen_json_configs(self):
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('[tool.setuptools.package-data]', pyproject)
+        self.assertIn('"server.config" = ["*.json"]', pyproject)
+        self.assertTrue((ROOT / "server/config/high_screen_fields.json").is_file())
+        self.assertTrue((ROOT / "server/config/high_screen_options.json").is_file())
+
+    def test_direct_script_entrypoint_can_import_bundled_config(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "server/mcp_server.py"), "--help"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("streamable-http", result.stdout)
 
     def test_empty_data_is_preserved(self):
         original_credentials = (server.INTEGRATOR_ID, server.SECRET_ID, server.SECRET_KEY)

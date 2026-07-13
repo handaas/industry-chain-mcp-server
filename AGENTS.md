@@ -51,6 +51,9 @@ Do not expose arbitrary `product_id` execution as a generic MCP tool.
 - Legacy flat advanced-filter list/count calls cap `pageSize` at 10.
 - `advanced_filter_get_enterprise_list` and `advanced_filter_get_enterprise_count` also accept a full high-screen `filter` condition object and route it to product `690dcb1b9c9dc8d0ff3c40eb`.
 - Full high-screen `params.filter` must be a compact JSON string at the HandaaS boundary. MCP clients may pass an object or JSON string; normalize exactly once before `call_api`.
+- High-screen validation is configuration-driven. `server/config/high_screen_fields.json` contains 369 field definitions and operator/normalization rules; `server/config/high_screen_options.json` contains 97 enum/tree sources. Both are public platform configuration version `0.14.3` and must ship as package data.
+- `server/high_screen.py` is the only condition normalization implementation. Do not reintroduce hard-coded field sets in `mcp_server.py`.
+- Reject unknown fields with suggestions. Enforce configured action/input types, option paths, keyword counts, numeric bounds, dates and preset actions. Apply only configured safe operator corrections; never guess an unknown field or invalid tree path.
 - High-screen top-level groups are `must` / `should` only. Reject `must_not` because the upstream product silently ignores it; exclusions use field-level `nin` / `neq` inside `must`.
 - Tree-enum fields such as `address`, `industriesV2`, `operStatus_v2`, and `enterpriseType` use list-of-paths values for `eq` / `neq`. Address province names normalize to platform province abbreviations, e.g. `广东省` -> `广东`.
 - Full high-screen condition mode returns the total and the first 50 rows and does not support `pageIndex` / `pageSize`; reject mixed flat/condition calls rather than silently dropping arguments. Legacy flat list mode remains paginated up to 500 rows.
@@ -109,6 +112,9 @@ Expected tool count is currently 24. No tool name should start with a custom wor
 ## Repository layout
 
 - `server/mcp_server.py`: server, product registry, normalization, upstream client, tools, CLI.
+- `server/high_screen.py`: configuration loader and high-screen condition validation/correction.
+- `server/config/high_screen_fields.json`: field descriptions, control metadata and operator rules.
+- `server/config/high_screen_options.json`: enum and tree-path values referenced by fields.
 - `tests/test_condition.py`: tool boundary, normalization, signing, health, and error regression tests.
 - `README.md`: user installation, Remote/local setup, complete tool documentation, Skill link.
 - `pyproject.toml`: package metadata, dependencies, console entrypoint.

@@ -11,7 +11,6 @@ import argparse
 import asyncio
 import json
 import os
-import re
 import sys
 from hashlib import md5
 from typing import Any, Dict, Optional, Union
@@ -21,6 +20,11 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from server.high_screen import HighScreenValidationError, normalize_filter
 
 load_dotenv()
 
@@ -224,253 +228,14 @@ def _api_error(product_id: str, error: str, message: str, **details: Any) -> Dic
     }
 
 
-HIGH_SCREEN_GROUP_KEYS = frozenset({"must", "should"})
-HIGH_SCREEN_OPERATORS = frozenset({"in", "nin", "eq", "neq", "gte", "lte", "gt", "lt", "exist"})
-HIGH_SCREEN_MAX_DEPTH = 12
-HIGH_SCREEN_MAX_CONDITIONS = 500
-HIGH_SCREEN_MAX_FILTER_CHARS = 200_000
-HIGH_SCREEN_PATH_FIELDS = frozenset({"address", "industriesV2", "operStatus_v2", "enterpriseType"})
-HIGH_SCREEN_ADDRESS_TOP_LEVEL = frozenset({
-    "北京", "天津", "河北", "山西", "内蒙古", "辽宁", "吉林", "黑龙江",
-    "上海", "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南",
-    "湖北", "湖南", "广东", "广西", "海南", "重庆", "四川", "贵州",
-    "云南", "西藏", "陕西", "甘肃", "青海", "宁夏", "新疆",
-})
-HIGH_SCREEN_ADDRESS_ALIASES = {
-    "北京市": "北京",
-    "天津市": "天津",
-    "上海市": "上海",
-    "重庆市": "重庆",
-    "河北省": "河北",
-    "山西省": "山西",
-    "辽宁省": "辽宁",
-    "吉林省": "吉林",
-    "黑龙江省": "黑龙江",
-    "江苏省": "江苏",
-    "浙江省": "浙江",
-    "安徽省": "安徽",
-    "福建省": "福建",
-    "江西省": "江西",
-    "山东省": "山东",
-    "河南省": "河南",
-    "湖北省": "湖北",
-    "湖南省": "湖南",
-    "广东省": "广东",
-    "海南省": "海南",
-    "四川省": "四川",
-    "贵州省": "贵州",
-    "云南省": "云南",
-    "陕西省": "陕西",
-    "甘肃省": "甘肃",
-    "青海省": "青海",
-    "台湾省": "台湾",
-    "内蒙古自治区": "内蒙古",
-    "广西壮族自治区": "广西",
-    "西藏自治区": "西藏",
-    "宁夏回族自治区": "宁夏",
-    "新疆维吾尔自治区": "新疆",
-}
-
-
-class _HighScreenValidationError(ValueError):
-    def __init__(self, message: str, path: str) -> None:
-        super().__init__(message)
-        self.path = path
-
-
-def _normalize_path_value(field: str, value: Any, path: str) -> list[list[str]]:
-    """Normalize tree-enum values to HandaaS' list-of-paths representation."""
-    paths: list[list[Any]]
-    if isinstance(value, str):
-        raw_paths = [part.strip() for part in re.split(r"[;；|\n]+", value) if part.strip()]
-        paths = [
-            [segment.strip() for segment in re.split(r"[,，/>]+", raw_path) if segment.strip()]
-            for raw_path in raw_paths
-        ]
-    elif isinstance(value, list) and value and all(isinstance(item, str) for item in value):
-        paths = [value]
-    elif isinstance(value, list) and value and all(isinstance(item, list) for item in value):
-        paths = value
-    else:
-        raise _HighScreenValidationError(
-            f"{field} 的 eq/neq 必须是路径数组的数组；也可传单一路径字符串，例如 \"广东省,深圳市\"。",
-            path,
-        )
-
-    normalized: list[list[str]] = []
-    for index, item in enumerate(paths):
-        item_path = f"{path}[{index}]"
-        if not item or not all(isinstance(segment, str) and segment.strip() for segment in item):
-            raise _HighScreenValidationError("每条枚举路径必须是非空字符串数组。", item_path)
-        clean = [segment.strip() for segment in item]
-        if field == "address":
-            clean[0] = HIGH_SCREEN_ADDRESS_ALIASES.get(clean[0], clean[0])
-            if clean[0] not in HIGH_SCREEN_ADDRESS_TOP_LEVEL:
-                raise _HighScreenValidationError(
-                    "注册地址路径首级必须是省级简称，例如广东、北京；城市筛选应写成 [\"广东\",\"深圳市\"]。",
-                    item_path,
-                )
-        normalized.append(clean)
-    return normalized
-
-
-def _validate_high_screen_operator(field: str, operator: str, value: Any, path: str) -> Any:
-    if operator not in HIGH_SCREEN_OPERATORS:
-        supported = ", ".join(sorted(HIGH_SCREEN_OPERATORS))
-        raise _HighScreenValidationError(f"不支持操作符 {operator!r}；可用操作符：{supported}。", path)
-    if field in HIGH_SCREEN_PATH_FIELDS:
-        if operator not in {"eq", "neq"}:
-            raise _HighScreenValidationError(
-                f"{field} 是树形枚举字段，只支持 eq/neq 和路径数组，不能使用 {operator}。",
-                path,
-            )
-        return _normalize_path_value(field, value, path)
-    if field == "addressValue" and operator not in {"in", "nin"}:
-        raise _HighScreenValidationError(
-            "addressValue 是详细地址关键词字段，只支持 in/nin 字符串数组。",
-            path,
-        )
-    if operator in {"in", "nin"} and (not isinstance(value, list) or not value):
-        raise _HighScreenValidationError(f"{operator} 的值必须是非空数组。", path)
-    if operator in {"eq", "neq"} and (value is None or value == "" or value == []):
-        raise _HighScreenValidationError(f"{operator} 的值不能为空。", path)
-    if operator in {"gte", "lte", "gt", "lt"}:
-        if isinstance(value, bool) or isinstance(value, (dict, list)) or value in {None, ""}:
-            raise _HighScreenValidationError(f"{operator} 的值必须是数字或日期字符串。", path)
-    if operator == "exist" and value not in {"0", "1", 0, 1, False, True}:
-        raise _HighScreenValidationError("exist 仅支持 0/1、\"0\"/\"1\" 或布尔值。", path)
-    return value
-
-
-def _validate_high_screen_group(
-    group: Dict[str, Any],
-    *,
-    path: str = "$",
-    depth: int = 0,
-    counter: Optional[list[int]] = None,
-) -> None:
-    if depth > HIGH_SCREEN_MAX_DEPTH:
-        raise _HighScreenValidationError(f"条件嵌套不能超过 {HIGH_SCREEN_MAX_DEPTH} 层。", path)
-    if counter is None:
-        counter = [0]
-    if not isinstance(group, dict) or not group:
-        raise _HighScreenValidationError("条件组必须是非空 JSON object。", path)
-
-    unknown_groups = set(group) - HIGH_SCREEN_GROUP_KEYS
-    if unknown_groups:
-        if "must_not" in unknown_groups:
-            raise _HighScreenValidationError(
-                "旷湖高筛不执行顶层 must_not；请把排除条件改为字段级 nin/neq，并放入 must。",
-                f"{path}.must_not",
-            )
-        unknown = ", ".join(sorted(str(key) for key in unknown_groups))
-        raise _HighScreenValidationError(
-            f"条件组仅支持 must/should，不能使用 {unknown}；不要添加 filter、condition、query 等包装层。",
-            path,
-        )
-
-    for group_key, conditions in group.items():
-        group_path = f"{path}.{group_key}"
-        if not isinstance(conditions, list) or not conditions:
-            raise _HighScreenValidationError(f"{group_key} 必须是非空数组。", group_path)
-        for index, condition in enumerate(conditions):
-            condition_path = f"{group_path}[{index}]"
-            counter[0] += 1
-            if counter[0] > HIGH_SCREEN_MAX_CONDITIONS:
-                raise _HighScreenValidationError(
-                    f"条件数量不能超过 {HIGH_SCREEN_MAX_CONDITIONS} 个。",
-                    condition_path,
-                )
-            if not isinstance(condition, dict) or len(condition) != 1:
-                raise _HighScreenValidationError(
-                    "每个条件必须是只含一个字段或一个嵌套 must/should 的 JSON object。",
-                    condition_path,
-                )
-
-            field, rules = next(iter(condition.items()))
-            if field in HIGH_SCREEN_GROUP_KEYS:
-                _validate_high_screen_group(
-                    {field: rules},
-                    path=condition_path,
-                    depth=depth + 1,
-                    counter=counter,
-                )
-                continue
-            if field == "must_not":
-                raise _HighScreenValidationError(
-                    "旷湖高筛不执行 must_not；请改用字段级 nin/neq。",
-                    f"{condition_path}.must_not",
-                )
-            if not isinstance(field, str) or not field.strip():
-                raise _HighScreenValidationError("字段名不能为空。", condition_path)
-            if not isinstance(rules, list) or not rules:
-                raise _HighScreenValidationError(
-                    "字段条件必须是非空规则数组，例如 [{\"in\":[\"机器人\"]}]。",
-                    f"{condition_path}.{field}",
-                )
-            for rule_index, rule in enumerate(rules):
-                rule_path = f"{condition_path}.{field}[{rule_index}]"
-                if not isinstance(rule, dict) or not rule:
-                    raise _HighScreenValidationError("操作符规则必须是非空 JSON object。", rule_path)
-                for operator, value in rule.items():
-                    rule[operator] = _validate_high_screen_operator(
-                        field,
-                        str(operator),
-                        value,
-                        f"{rule_path}.{operator}",
-                    )
-
-
 def _normalize_high_screen_filter(
     product_id: str,
     value: Any,
 ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
-    """Validate an MCP condition object and serialize the exact upstream filter string."""
-    if isinstance(value, str):
-        raw = value.strip()
-        if not raw:
-            return None, _api_error(product_id, "参数错误", "filter 不能为空。", field="filter")
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, str):
-                parsed = json.loads(parsed)
-        except json.JSONDecodeError as exc:
-            return None, _api_error(
-                product_id,
-                "参数错误",
-                "filter 必须是合法 JSON object 或其 JSON 字符串。",
-                field="filter",
-                path=f"字符位置 {exc.pos}",
-            )
-    elif isinstance(value, dict):
-        try:
-            parsed = json.loads(json.dumps(value, ensure_ascii=False))
-        except (TypeError, ValueError):
-            return None, _api_error(
-                product_id,
-                "参数错误",
-                "filter 包含不可序列化的值。",
-                field="filter",
-            )
-    else:
-        return None, _api_error(
-            product_id,
-            "参数错误",
-            "filter 必须是 JSON object 或 JSON object 字符串。",
-            field="filter",
-        )
-
-    if not isinstance(parsed, dict):
-        return None, _api_error(
-            product_id,
-            "参数错误",
-            "filter 顶层必须是 JSON object，且直接包含 must/should。",
-            field="filter",
-            path="$",
-        )
+    """Validate and correct an MCP condition using the bundled field config."""
     try:
-        _validate_high_screen_group(parsed)
-    except _HighScreenValidationError as exc:
+        return normalize_filter(value), None
+    except HighScreenValidationError as exc:
         return None, _api_error(
             product_id,
             "参数错误",
@@ -478,16 +243,6 @@ def _normalize_high_screen_filter(
             field="filter",
             path=exc.path,
         )
-
-    compact = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
-    if len(compact) > HIGH_SCREEN_MAX_FILTER_CHARS:
-        return None, _api_error(
-            product_id,
-            "参数错误",
-            f"filter 序列化后不能超过 {HIGH_SCREEN_MAX_FILTER_CHARS} 个字符。",
-            field="filter",
-        )
-    return compact, None
 
 
 def _advanced_filter_flat_params(**values: Any) -> Dict[str, Any]:
