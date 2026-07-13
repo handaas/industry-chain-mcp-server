@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from hashlib import md5
 from typing import Any, Dict, Optional, Union
@@ -49,12 +50,14 @@ mcp = FastMCP(
 @mcp.custom_route("/api/health", methods=["GET"])
 async def health_check(_: Request) -> JSONResponse:
     """Credential-free readiness endpoint for local and hosted deployments."""
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    registered_tools = getattr(tool_manager, "_tools", {})
     return JSONResponse({
         "ok": True,
         "ready": bool(INTEGRATOR_ID and SECRET_ID and SECRET_KEY),
         "service": "handaas-industry-chain-mcp-server",
         "mcp_path": "/mcp",
-        "tool_count": len(PRODUCT_IDS),
+        "tool_count": len(registered_tools),
         "credentials_configured": bool(INTEGRATOR_ID and SECRET_ID and SECRET_KEY),
     })
 
@@ -74,6 +77,7 @@ PRODUCT_IDS = {
     "supply_downstream_enterprises": "68c02fb58cc760ff46ee948e",
     "advanced_filter_count": "690342962e32082a0cfd003a",
     "advanced_filter_list": "690367b52e32082a0cfd00ba",
+    "advanced_filter_condition_list": "690dcb1b9c9dc8d0ff3c40eb",
     # 专利大数据服务
     "patent_search": "66b338e274bf098447db7f37",
     "patent_stats": "66d5b7df537c3f61d646c230",
@@ -104,6 +108,7 @@ PRODUCT_NAMES = {
     "supply_downstream_enterprises": "下游企业清单查询",
     "advanced_filter_count": "高级筛选企业数量查询",
     "advanced_filter_list": "高级筛选企业清单查询",
+    "advanced_filter_condition_list": "高筛条件组企业清单查询",
     "patent_search": "专利信息搜索",
     "patent_stats": "企业专利统计分析",
     "bid_win_stats": "企业中标统计",
@@ -217,6 +222,303 @@ def _api_error(product_id: str, error: str, message: str, **details: Any) -> Dic
         **_product_meta(product_id),
         **details,
     }
+
+
+HIGH_SCREEN_GROUP_KEYS = frozenset({"must", "should"})
+HIGH_SCREEN_OPERATORS = frozenset({"in", "nin", "eq", "neq", "gte", "lte", "gt", "lt", "exist"})
+HIGH_SCREEN_MAX_DEPTH = 12
+HIGH_SCREEN_MAX_CONDITIONS = 500
+HIGH_SCREEN_MAX_FILTER_CHARS = 200_000
+HIGH_SCREEN_PATH_FIELDS = frozenset({"address", "industriesV2", "operStatus_v2", "enterpriseType"})
+HIGH_SCREEN_ADDRESS_TOP_LEVEL = frozenset({
+    "北京", "天津", "河北", "山西", "内蒙古", "辽宁", "吉林", "黑龙江",
+    "上海", "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南",
+    "湖北", "湖南", "广东", "广西", "海南", "重庆", "四川", "贵州",
+    "云南", "西藏", "陕西", "甘肃", "青海", "宁夏", "新疆",
+})
+HIGH_SCREEN_ADDRESS_ALIASES = {
+    "北京市": "北京",
+    "天津市": "天津",
+    "上海市": "上海",
+    "重庆市": "重庆",
+    "河北省": "河北",
+    "山西省": "山西",
+    "辽宁省": "辽宁",
+    "吉林省": "吉林",
+    "黑龙江省": "黑龙江",
+    "江苏省": "江苏",
+    "浙江省": "浙江",
+    "安徽省": "安徽",
+    "福建省": "福建",
+    "江西省": "江西",
+    "山东省": "山东",
+    "河南省": "河南",
+    "湖北省": "湖北",
+    "湖南省": "湖南",
+    "广东省": "广东",
+    "海南省": "海南",
+    "四川省": "四川",
+    "贵州省": "贵州",
+    "云南省": "云南",
+    "陕西省": "陕西",
+    "甘肃省": "甘肃",
+    "青海省": "青海",
+    "台湾省": "台湾",
+    "内蒙古自治区": "内蒙古",
+    "广西壮族自治区": "广西",
+    "西藏自治区": "西藏",
+    "宁夏回族自治区": "宁夏",
+    "新疆维吾尔自治区": "新疆",
+}
+
+
+class _HighScreenValidationError(ValueError):
+    def __init__(self, message: str, path: str) -> None:
+        super().__init__(message)
+        self.path = path
+
+
+def _normalize_path_value(field: str, value: Any, path: str) -> list[list[str]]:
+    """Normalize tree-enum values to HandaaS' list-of-paths representation."""
+    paths: list[list[Any]]
+    if isinstance(value, str):
+        raw_paths = [part.strip() for part in re.split(r"[;；|\n]+", value) if part.strip()]
+        paths = [
+            [segment.strip() for segment in re.split(r"[,，/>]+", raw_path) if segment.strip()]
+            for raw_path in raw_paths
+        ]
+    elif isinstance(value, list) and value and all(isinstance(item, str) for item in value):
+        paths = [value]
+    elif isinstance(value, list) and value and all(isinstance(item, list) for item in value):
+        paths = value
+    else:
+        raise _HighScreenValidationError(
+            f"{field} 的 eq/neq 必须是路径数组的数组；也可传单一路径字符串，例如 \"广东省,深圳市\"。",
+            path,
+        )
+
+    normalized: list[list[str]] = []
+    for index, item in enumerate(paths):
+        item_path = f"{path}[{index}]"
+        if not item or not all(isinstance(segment, str) and segment.strip() for segment in item):
+            raise _HighScreenValidationError("每条枚举路径必须是非空字符串数组。", item_path)
+        clean = [segment.strip() for segment in item]
+        if field == "address":
+            clean[0] = HIGH_SCREEN_ADDRESS_ALIASES.get(clean[0], clean[0])
+            if clean[0] not in HIGH_SCREEN_ADDRESS_TOP_LEVEL:
+                raise _HighScreenValidationError(
+                    "注册地址路径首级必须是省级简称，例如广东、北京；城市筛选应写成 [\"广东\",\"深圳市\"]。",
+                    item_path,
+                )
+        normalized.append(clean)
+    return normalized
+
+
+def _validate_high_screen_operator(field: str, operator: str, value: Any, path: str) -> Any:
+    if operator not in HIGH_SCREEN_OPERATORS:
+        supported = ", ".join(sorted(HIGH_SCREEN_OPERATORS))
+        raise _HighScreenValidationError(f"不支持操作符 {operator!r}；可用操作符：{supported}。", path)
+    if field in HIGH_SCREEN_PATH_FIELDS:
+        if operator not in {"eq", "neq"}:
+            raise _HighScreenValidationError(
+                f"{field} 是树形枚举字段，只支持 eq/neq 和路径数组，不能使用 {operator}。",
+                path,
+            )
+        return _normalize_path_value(field, value, path)
+    if field == "addressValue" and operator not in {"in", "nin"}:
+        raise _HighScreenValidationError(
+            "addressValue 是详细地址关键词字段，只支持 in/nin 字符串数组。",
+            path,
+        )
+    if operator in {"in", "nin"} and (not isinstance(value, list) or not value):
+        raise _HighScreenValidationError(f"{operator} 的值必须是非空数组。", path)
+    if operator in {"eq", "neq"} and (value is None or value == "" or value == []):
+        raise _HighScreenValidationError(f"{operator} 的值不能为空。", path)
+    if operator in {"gte", "lte", "gt", "lt"}:
+        if isinstance(value, bool) or isinstance(value, (dict, list)) or value in {None, ""}:
+            raise _HighScreenValidationError(f"{operator} 的值必须是数字或日期字符串。", path)
+    if operator == "exist" and value not in {"0", "1", 0, 1, False, True}:
+        raise _HighScreenValidationError("exist 仅支持 0/1、\"0\"/\"1\" 或布尔值。", path)
+    return value
+
+
+def _validate_high_screen_group(
+    group: Dict[str, Any],
+    *,
+    path: str = "$",
+    depth: int = 0,
+    counter: Optional[list[int]] = None,
+) -> None:
+    if depth > HIGH_SCREEN_MAX_DEPTH:
+        raise _HighScreenValidationError(f"条件嵌套不能超过 {HIGH_SCREEN_MAX_DEPTH} 层。", path)
+    if counter is None:
+        counter = [0]
+    if not isinstance(group, dict) or not group:
+        raise _HighScreenValidationError("条件组必须是非空 JSON object。", path)
+
+    unknown_groups = set(group) - HIGH_SCREEN_GROUP_KEYS
+    if unknown_groups:
+        if "must_not" in unknown_groups:
+            raise _HighScreenValidationError(
+                "旷湖高筛不执行顶层 must_not；请把排除条件改为字段级 nin/neq，并放入 must。",
+                f"{path}.must_not",
+            )
+        unknown = ", ".join(sorted(str(key) for key in unknown_groups))
+        raise _HighScreenValidationError(
+            f"条件组仅支持 must/should，不能使用 {unknown}；不要添加 filter、condition、query 等包装层。",
+            path,
+        )
+
+    for group_key, conditions in group.items():
+        group_path = f"{path}.{group_key}"
+        if not isinstance(conditions, list) or not conditions:
+            raise _HighScreenValidationError(f"{group_key} 必须是非空数组。", group_path)
+        for index, condition in enumerate(conditions):
+            condition_path = f"{group_path}[{index}]"
+            counter[0] += 1
+            if counter[0] > HIGH_SCREEN_MAX_CONDITIONS:
+                raise _HighScreenValidationError(
+                    f"条件数量不能超过 {HIGH_SCREEN_MAX_CONDITIONS} 个。",
+                    condition_path,
+                )
+            if not isinstance(condition, dict) or len(condition) != 1:
+                raise _HighScreenValidationError(
+                    "每个条件必须是只含一个字段或一个嵌套 must/should 的 JSON object。",
+                    condition_path,
+                )
+
+            field, rules = next(iter(condition.items()))
+            if field in HIGH_SCREEN_GROUP_KEYS:
+                _validate_high_screen_group(
+                    {field: rules},
+                    path=condition_path,
+                    depth=depth + 1,
+                    counter=counter,
+                )
+                continue
+            if field == "must_not":
+                raise _HighScreenValidationError(
+                    "旷湖高筛不执行 must_not；请改用字段级 nin/neq。",
+                    f"{condition_path}.must_not",
+                )
+            if not isinstance(field, str) or not field.strip():
+                raise _HighScreenValidationError("字段名不能为空。", condition_path)
+            if not isinstance(rules, list) or not rules:
+                raise _HighScreenValidationError(
+                    "字段条件必须是非空规则数组，例如 [{\"in\":[\"机器人\"]}]。",
+                    f"{condition_path}.{field}",
+                )
+            for rule_index, rule in enumerate(rules):
+                rule_path = f"{condition_path}.{field}[{rule_index}]"
+                if not isinstance(rule, dict) or not rule:
+                    raise _HighScreenValidationError("操作符规则必须是非空 JSON object。", rule_path)
+                for operator, value in rule.items():
+                    rule[operator] = _validate_high_screen_operator(
+                        field,
+                        str(operator),
+                        value,
+                        f"{rule_path}.{operator}",
+                    )
+
+
+def _normalize_high_screen_filter(
+    product_id: str,
+    value: Any,
+) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Validate an MCP condition object and serialize the exact upstream filter string."""
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None, _api_error(product_id, "参数错误", "filter 不能为空。", field="filter")
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, str):
+                parsed = json.loads(parsed)
+        except json.JSONDecodeError as exc:
+            return None, _api_error(
+                product_id,
+                "参数错误",
+                "filter 必须是合法 JSON object 或其 JSON 字符串。",
+                field="filter",
+                path=f"字符位置 {exc.pos}",
+            )
+    elif isinstance(value, dict):
+        try:
+            parsed = json.loads(json.dumps(value, ensure_ascii=False))
+        except (TypeError, ValueError):
+            return None, _api_error(
+                product_id,
+                "参数错误",
+                "filter 包含不可序列化的值。",
+                field="filter",
+            )
+    else:
+        return None, _api_error(
+            product_id,
+            "参数错误",
+            "filter 必须是 JSON object 或 JSON object 字符串。",
+            field="filter",
+        )
+
+    if not isinstance(parsed, dict):
+        return None, _api_error(
+            product_id,
+            "参数错误",
+            "filter 顶层必须是 JSON object，且直接包含 must/should。",
+            field="filter",
+            path="$",
+        )
+    try:
+        _validate_high_screen_group(parsed)
+    except _HighScreenValidationError as exc:
+        return None, _api_error(
+            product_id,
+            "参数错误",
+            str(exc),
+            field="filter",
+            path=exc.path,
+        )
+
+    compact = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+    if len(compact) > HIGH_SCREEN_MAX_FILTER_CHARS:
+        return None, _api_error(
+            product_id,
+            "参数错误",
+            f"filter 序列化后不能超过 {HIGH_SCREEN_MAX_FILTER_CHARS} 个字符。",
+            field="filter",
+        )
+    return compact, None
+
+
+def _advanced_filter_flat_params(**values: Any) -> Dict[str, Any]:
+    return _drop_none(values)
+
+
+def _validate_advanced_filter_mode(
+    product_id: str,
+    filter_value: Any,
+    flat_params: Dict[str, Any],
+    page_index: int,
+    page_size: int,
+) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    if filter_value is None:
+        return None, None
+    if flat_params:
+        return None, _api_error(
+            product_id,
+            "参数冲突",
+            "使用 filter 条件组时不能同时传入 operStatus、address、industries、name 等扁平条件。",
+            field="filter",
+            conflicting_fields=sorted(flat_params),
+        )
+    if page_index != 1 or page_size != 10:
+        return None, _api_error(
+            product_id,
+            "参数冲突",
+            "完整高筛条件组产品返回总命中数和前50条清单，不支持 pageIndex/pageSize；请保留默认值。",
+            field="pageIndex/pageSize",
+        )
+    return _normalize_high_screen_filter(product_id, filter_value)
 
 
 def call_api(product_id: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -489,6 +791,7 @@ def supply_get_down_stream_enterprises(
 
 @mcp.tool()
 def advanced_filter_get_enterprise_count(
+    filter: Optional[Union[str, Dict[str, Any]]] = None,
     operStatus: Optional[str] = None,
     address: Optional[str] = None,
     industries: Optional[str] = None,
@@ -504,9 +807,13 @@ def advanced_filter_get_enterprise_count(
     pageSize: int = 10,
 ) -> dict:
     """
-    通过高级筛选条件查询全国符合要求的企业数量。该接口只返回数量。
+    查询符合高级筛选条件的企业数量。
+
+    推荐直接传入旷湖高筛条件组 filter。MCP 可接收 JSON object 或 JSON 字符串，
+    校验后会按上游要求序列化为紧凑 JSON 字符串。为兼容旧调用，也可继续使用扁平字段。
 
     请求参数:
+    - filter: 完整高筛条件组，例如 {"must":[{"operStatus_v2":[{"eq":[["营业"]]}]}]}
     - operStatus: 营业状态，例如“营业,吊销”或“!吊销”
     - address: 地址筛选条件
     - industries: 行业筛选条件
@@ -515,30 +822,58 @@ def advanced_filter_get_enterprise_count(
     - foundTimeGte/foundTimeLte: 成立时间范围
     - regCapitalRmbGte/regCapitalRmbLte: 注册资本范围，单位万元
     - totalPayAmountGte/totalPayAmountLte: 实缴资本范围，单位万元
+
+    注意:
+    - filter 顶层只支持 must/should。
+    - 排除条件使用字段级 nin/neq 并放入 must，不能使用 must_not。
+    - filter 不能与扁平字段或非默认分页参数混用。
     """
+    flat_params = _advanced_filter_flat_params(
+        operStatus=operStatus,
+        address=address,
+        industries=industries,
+        enterpriseType=enterpriseType,
+        name=name,
+        foundTimeGte=foundTimeGte,
+        foundTimeLte=foundTimeLte,
+        regCapitalRmbGte=regCapitalRmbGte,
+        regCapitalRmbLte=regCapitalRmbLte,
+        totalPayAmountGte=totalPayAmountGte,
+        totalPayAmountLte=totalPayAmountLte,
+    )
+    if filter is not None:
+        product_id = PRODUCT_IDS["advanced_filter_condition_list"]
+        filter_string, error = _validate_advanced_filter_mode(
+            product_id,
+            filter,
+            flat_params,
+            pageIndex,
+            pageSize,
+        )
+        if error:
+            return error
+        result = call_api(product_id, {"filter": filter_string})
+        if not isinstance(result, dict) or "error" in result:
+            return result
+        total = result.get("total")
+        if isinstance(total, bool) or not isinstance(total, (int, float, str)):
+            return _api_error(product_id, "响应格式错误", "高筛接口响应缺少可识别的 total。")
+        try:
+            return {"total": int(total)}
+        except (TypeError, ValueError):
+            return _api_error(product_id, "响应格式错误", "高筛接口返回的 total 不是整数。")
+
     product_id = PRODUCT_IDS["advanced_filter_count"]
     page, error = _normalize_pagination(product_id, pageIndex, pageSize, max_page_size=10)
     if error:
         return error
-    params = _drop_none({
-        "operStatus": operStatus,
-        "address": address,
-        "industries": industries,
-        "enterpriseType": enterpriseType,
-        "name": name,
-        "foundTimeGte": foundTimeGte,
-        "foundTimeLte": foundTimeLte,
-        "regCapitalRmbGte": regCapitalRmbGte,
-        "regCapitalRmbLte": regCapitalRmbLte,
-        "totalPayAmountGte": totalPayAmountGte,
-        "totalPayAmountLte": totalPayAmountLte,
-        **(page or {}),
-    })
+    params = {**flat_params, **(page or {})}
     return call_api(product_id, params)
 
 
 @mcp.tool()
 def advanced_filter_get_enterprise_list(
+    filter: Optional[Union[str, Dict[str, Any]]] = None,
     operStatus: Optional[str] = None,
     address: Optional[str] = None,
     industries: Optional[str] = None,
@@ -554,28 +889,54 @@ def advanced_filter_get_enterprise_list(
     pageSize: int = 10,
 ) -> dict:
     """
-    通过高级筛选条件查询全国符合要求的企业清单列表，最多返回500条。
+    通过高级筛选条件查询全国符合要求的企业清单。
 
-    请求参数同 advanced_filter_get_enterprise_count。
+    推荐传入完整旷湖高筛条件组 filter；同时兼容旧版扁平字段。
+    filter 可以是 JSON object 或 JSON 字符串，顶层只允许 must/should。
+    排除条件必须使用字段级 nin/neq，不能使用顶层 must_not。
+    完整条件组产品返回总命中数与前50条企业；旧版扁平模式可分页获取最多500条。
+
+    示例:
+    {"must":[
+      {"operStatus_v2":[{"eq":[["营业"]]}]},
+      {"enterpriseType":[{"neq":[["个体户"]]}]},
+      {"should":[
+        {"businessKeywords":[{"in":["工业机器人"]}]},
+        {"business":[{"in":["工业机器人"]}]}
+      ]}
+    ]}
     """
+    flat_params = _advanced_filter_flat_params(
+        operStatus=operStatus,
+        address=address,
+        industries=industries,
+        enterpriseType=enterpriseType,
+        name=name,
+        foundTimeGte=foundTimeGte,
+        foundTimeLte=foundTimeLte,
+        regCapitalRmbGte=regCapitalRmbGte,
+        regCapitalRmbLte=regCapitalRmbLte,
+        totalPayAmountGte=totalPayAmountGte,
+        totalPayAmountLte=totalPayAmountLte,
+    )
+    if filter is not None:
+        product_id = PRODUCT_IDS["advanced_filter_condition_list"]
+        filter_string, error = _validate_advanced_filter_mode(
+            product_id,
+            filter,
+            flat_params,
+            pageIndex,
+            pageSize,
+        )
+        if error:
+            return error
+        return call_api(product_id, {"filter": filter_string})
+
     product_id = PRODUCT_IDS["advanced_filter_list"]
     page, error = _normalize_pagination(product_id, pageIndex, pageSize, max_page_size=10)
     if error:
         return error
-    params = _drop_none({
-        "operStatus": operStatus,
-        "address": address,
-        "industries": industries,
-        "enterpriseType": enterpriseType,
-        "name": name,
-        "foundTimeGte": foundTimeGte,
-        "foundTimeLte": foundTimeLte,
-        "regCapitalRmbGte": regCapitalRmbGte,
-        "regCapitalRmbLte": regCapitalRmbLte,
-        "totalPayAmountGte": totalPayAmountGte,
-        "totalPayAmountLte": totalPayAmountLte,
-        **(page or {}),
-    })
+    params = {**flat_params, **(page or {})}
     return call_api(product_id, params)
 
 

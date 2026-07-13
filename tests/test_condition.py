@@ -52,6 +52,7 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
     def test_existing_handaas_product_ids_present(self):
         self.assertEqual(server.PRODUCT_IDS["enterprise_keyword_search"], "675cea1f0e009a9ea37edaa1")
         self.assertEqual(server.PRODUCT_IDS["supply_downstream_products"], "68c02b268cc760ff46ee93c3")
+        self.assertEqual(server.PRODUCT_IDS["advanced_filter_condition_list"], "690dcb1b9c9dc8d0ff3c40eb")
         self.assertEqual(server.PRODUCT_IDS["patent_stats"], "66d5b7df537c3f61d646c230")
         self.assertEqual(server.PRODUCT_IDS["policy_search"], "66c702b725f04ab44cd24ceb")
 
@@ -182,6 +183,166 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertEqual(captured["params"]["pageIndex"], 2)
         self.assertEqual(captured["params"]["pageSize"], 10)
         self.assertNotIn("product_id", captured["params"])
+
+    def test_high_screen_object_is_validated_and_compacted_for_upstream(self):
+        captured = {}
+        original = server.call_api
+        condition = {
+            "must": [
+                {"operStatus_v2": [{"eq": [["营业"]]}]},
+                {"regCapitalRmb": [{"gte": 10, "lte": 10000}]},
+                {"should": [
+                    {"businessKeywords": [{"in": ["工业机器人"]}]},
+                    {"business": [{"in": ["工业机器人"]}]},
+                ]},
+                {"name": [{"nin": ["贸易", "培训"]}]},
+            ]
+        }
+
+        def fake_call_api(product_id, params=None):
+            captured["product_id"] = product_id
+            captured["params"] = params or {}
+            return {"resultList": [], "total": 0}
+
+        try:
+            server.call_api = fake_call_api
+            result = server.advanced_filter_get_enterprise_list(filter=condition)
+        finally:
+            server.call_api = original
+
+        self.assertEqual(result, {"resultList": [], "total": 0})
+        self.assertEqual(captured["product_id"], server.PRODUCT_IDS["advanced_filter_condition_list"])
+        self.assertIsInstance(captured["params"]["filter"], str)
+        self.assertEqual(json.loads(captured["params"]["filter"]), condition)
+        self.assertNotIn(" ", captured["params"]["filter"])
+
+    def test_high_screen_json_string_is_not_double_encoded(self):
+        captured = {}
+        original = server.call_api
+        condition = {"must": [{"name": [{"in": ["汇川技术"]}]}]}
+
+        def fake_call_api(product_id, params=None):
+            captured["params"] = params or {}
+            return {"resultList": [], "total": 0}
+
+        try:
+            server.call_api = fake_call_api
+            server.advanced_filter_get_enterprise_list(
+                filter=json.dumps(condition, ensure_ascii=False, indent=2),
+            )
+        finally:
+            server.call_api = original
+
+        self.assertEqual(captured["params"]["filter"], json.dumps(condition, ensure_ascii=False, separators=(",", ":")))
+
+    def test_high_screen_normalizes_complex_address_paths(self):
+        product_id = server.PRODUCT_IDS["advanced_filter_condition_list"]
+        value, error = server._normalize_high_screen_filter(product_id, {
+            "must": [
+                {"address": [{"eq": "广东省,深圳市"}]},
+                {"address": [{"neq": "广东省,广州市;江苏省,南京市"}]},
+                {"addressValue": [{"in": ["南山区", "工业园"]}]},
+            ]
+        })
+
+        self.assertIsNone(error)
+        parsed = json.loads(value)
+        self.assertEqual(parsed["must"][0]["address"][0]["eq"], [["广东", "深圳市"]])
+        self.assertEqual(
+            parsed["must"][1]["address"][0]["neq"],
+            [["广东", "广州市"], ["江苏", "南京市"]],
+        )
+        self.assertEqual(parsed["must"][2]["addressValue"][0]["in"], ["南山区", "工业园"])
+
+    def test_high_screen_normalizes_single_address_path_array(self):
+        product_id = server.PRODUCT_IDS["advanced_filter_condition_list"]
+        value, error = server._normalize_high_screen_filter(product_id, {
+            "must": [{"address": [{"eq": ["广东省", "深圳市", "南山区"]}]}],
+        })
+        self.assertIsNone(error)
+        self.assertEqual(
+            json.loads(value)["must"][0]["address"][0]["eq"],
+            [["广东", "深圳市", "南山区"]],
+        )
+
+    def test_high_screen_rejects_address_without_province_path(self):
+        result = server.advanced_filter_get_enterprise_list(filter={
+            "must": [{"address": [{"eq": "深圳市"}]}],
+        })
+        self.assertEqual(result["error"], "参数错误")
+        self.assertEqual(result["field"], "filter")
+        self.assertIn("省级简称", result["message"])
+
+    def test_high_screen_rejects_wrong_operators_for_address_fields(self):
+        tree_error = server.advanced_filter_get_enterprise_list(filter={
+            "must": [{"address": [{"in": ["广东"]}]}],
+        })
+        detail_error = server.advanced_filter_get_enterprise_list(filter={
+            "must": [{"addressValue": [{"eq": "南山区"}]}],
+        })
+        self.assertEqual(tree_error["error"], "参数错误")
+        self.assertIn("只支持 eq/neq", tree_error["message"])
+        self.assertEqual(detail_error["error"], "参数错误")
+        self.assertIn("只支持 in/nin", detail_error["message"])
+
+    def test_high_screen_rejects_ignored_must_not_without_calling_upstream(self):
+        original = server.call_api
+        try:
+            server.call_api = lambda *args, **kwargs: self.fail("upstream must not be called")
+            result = server.advanced_filter_get_enterprise_list(filter={
+                "must": [{"operStatus_v2": [{"eq": [["营业"]]}]}],
+                "must_not": [{"name": [{"nin": ["贸易"]}]}],
+            })
+        finally:
+            server.call_api = original
+
+        self.assertEqual(result["error"], "参数错误")
+        self.assertEqual(result["field"], "filter")
+        self.assertEqual(result["path"], "$.must_not")
+        self.assertEqual(result["product_key"], "advanced_filter_condition_list")
+        self.assertIn("nin/neq", result["message"])
+
+    def test_high_screen_rejects_condition_wrapper_and_unsupported_operator(self):
+        wrapped = server.advanced_filter_get_enterprise_list(filter={
+            "condition": {"must": [{"name": [{"in": ["机器人"]}]}]},
+        })
+        unsupported = server.advanced_filter_get_enterprise_list(filter={
+            "must": [{"name": [{"match": "机器人"}]}],
+        })
+
+        self.assertEqual(wrapped["error"], "参数错误")
+        self.assertIn("包装层", wrapped["message"])
+        self.assertEqual(unsupported["error"], "参数错误")
+        self.assertIn("不支持操作符", unsupported["message"])
+
+    def test_high_screen_rejects_mixed_flat_and_condition_modes(self):
+        result = server.advanced_filter_get_enterprise_list(
+            filter={"must": [{"name": [{"in": ["机器人"]}]}]},
+            name="机器人",
+        )
+        self.assertEqual(result["error"], "参数冲突")
+        self.assertEqual(result["conflicting_fields"], ["name"])
+
+    def test_high_screen_count_uses_full_condition_product_total(self):
+        captured = {}
+        original = server.call_api
+
+        def fake_call_api(product_id, params=None):
+            captured["product_id"] = product_id
+            captured["params"] = params or {}
+            return {"resultList": [{"name": "企业A"}], "total": "27"}
+
+        try:
+            server.call_api = fake_call_api
+            result = server.advanced_filter_get_enterprise_count(filter={
+                "must": [{"businessKeywords": [{"in": ["伺服驱动器"]}]}],
+            })
+        finally:
+            server.call_api = original
+
+        self.assertEqual(result, {"total": 27})
+        self.assertEqual(captured["product_id"], server.PRODUCT_IDS["advanced_filter_condition_list"])
+        self.assertIsInstance(captured["params"]["filter"], str)
 
     def test_invalid_pagination_is_actionable_and_does_not_call_upstream(self):
         original = server.call_api

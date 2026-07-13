@@ -450,9 +450,10 @@ Remote token 模式不需要在 Skill 中再次配置 `integrator_id`、`secret_
 ### 12. advanced_filter_get_enterprise_count
 **功能**: 高级筛选获取企业数量
 
-通过高级筛选条件查询全国符合要求的企业数量。该接口只返回数量，如需查询企业清单请使用 `advanced_filter_get_enterprise_list`。
+通过旷湖高筛条件组查询符合要求的企业数量。`filter` 可直接传 JSON object，也可传 JSON 字符串；MCP 会校验并转换为高筛产品要求的紧凑 JSON 字符串。旧版扁平字段继续兼容。
 
 **参数**:
+- `filter` (推荐): 顶层直接包含 `must` / `should` 的高筛条件组
 - `operStatus` (可选): 营业状态，例如“营业,吊销”或“!吊销”
 - `address` (可选): 地址筛选条件
 - `industries` (可选): 行业筛选条件
@@ -465,22 +466,65 @@ Remote token 模式不需要在 Skill 中再次配置 `integrator_id`、`secret_
 - `totalPayAmountGte` (可选): 实缴资本最小值，单位万元
 - `totalPayAmountLte` (可选): 实缴资本最大值，单位万元
 
+使用 `filter` 时不要同时传扁平字段或非默认分页参数。完整条件组查询产品 ID 为 `690dcb1b9c9dc8d0ff3c40eb`。
+
 **返回值**:
 - `total`: 符合条件的企业数量
 
 ### 13. advanced_filter_get_enterprise_list
 **功能**: 高级筛选获取企业清单
 
-通过高级筛选条件查询全国符合要求的企业清单列表，最多返回500条。
+通过高级筛选条件查询全国符合要求的企业清单。推荐直接传入 `filter` 条件组；完整条件组产品不支持分页，返回总命中数和前50条企业。旧版扁平模式可分页获取最多500条。
 
 **参数**:
-- 同 `advanced_filter_get_enterprise_count`
-- `pageIndex` (可选): 页码，最大页码为50
-- `pageSize` (可选): 分页大小，一页最大10条
+- `filter` (推荐): JSON object 或 JSON 字符串
+- 旧版扁平参数同 `advanced_filter_get_enterprise_count`
+- `pageIndex` / `pageSize`: 仅旧版扁平参数模式使用，一页最大10条
 
 **返回值**:
 - `total`: 总数
 - `resultList`: 企业清单列表
+
+#### 高筛条件组规则
+
+- 顶层只允许 `must` / `should`，不要添加 `filter`、`condition`、`query` 包装层。
+- 字段条件格式为 `{"字段名":[{"操作符":值}]}`。
+- 支持 `in`、`nin`、`eq`、`neq`、`gte`、`lte`、`gt`、`lt`、`exist`。
+- 高筛不会执行顶层 `must_not`。排除条件必须使用字段级 `nin` / `neq` 并放入 `must`。
+- `address`、`industriesV2`、`operStatus_v2`、`enterpriseType` 的 `eq` / `neq` 使用路径数组的数组。
+- `addressValue` 是详细地址关键词字段，使用 `in` / `nin` 字符串数组，不要与注册地址树形字段混用。
+
+注册地址示例：
+
+```json
+{"must":[{"address":[{"eq":[["广东"]]}]}]}
+```
+
+深圳市示例：
+
+```json
+{"must":[{"address":[{"eq":[["广东","深圳市"]]}]}]}
+```
+
+MCP 也会把 `"广东省"`、`"广东省,深圳市"` 或 `["广东省","深圳市"]` 归一化为上述路径；多个地区字符串用分号分隔，例如 `"广东省,深圳市;江苏省,苏州市"`。城市不能脱离省级路径单独传入。
+
+工商、业务关键词与地址组合示例：
+
+```json
+{
+  "must": [
+    {"operStatus_v2": [{"eq": [["营业"]]}]},
+    {"enterpriseType": [{"neq": [["个体户"]]}]},
+    {"address": [{"eq": [["广东"]]}]},
+    {"name": [{"nin": ["贸易", "培训"]}]},
+    {"should": [
+      {"businessKeywords": [{"in": ["工业机器人", "机器人控制器"]}]},
+      {"business": [{"in": ["工业机器人", "机器人控制器"]}]},
+      {"desc": [{"in": ["工业机器人", "机器人控制器"]}]}
+    ]}
+  ]
+}
+```
 
 ### 14. patent_bigdata_patent_search
 **功能**: 专利信息搜索
@@ -655,8 +699,8 @@ Remote token 模式不需要在 Skill 中再次配置 `integrator_id`、`secret_
 ## 使用注意事项
 
 1. **企业全称要求**: 在调用需要企业全称的接口时，如果没有企业全称则先调用企业关键词模糊查询接口获取企业全称或企业ID
-2. **分页限制**: 列表类接口通常一页最多获取50条数据，高级筛选企业清单一页最大10条、最多返回500条
-3. **JSON参数格式**: `bid_bigdata_bid_search` 的 `biddingType`、`biddingRegion` 支持 JSON 数组或合法 JSON 字符串；错误会返回具体工具、产品和字段
+2. **分页限制**: 列表类接口通常一页最多获取50条数据；旧版扁平高级筛选一页最大10条且最多获取500条，完整 `filter` 条件组返回总数和前50条且不支持分页
+3. **复杂参数格式**: 高筛 `filter` 可传 JSON object 或字符串；注册地址使用省/市/区路径，详细地址关键词使用 `addressValue in/nin`；格式错误会返回产品、字段和 JSON 路径
 4. **Remote优先**: 推荐使用官方Remote服务，客户端只需要配置平台token
 5. **凭证安全**: 本地启动时不要提交 `.env`、secret_id、secret_key 或签名
 6. **接口权限**: 可用数据取决于账号已开通的数据产品权限
@@ -680,9 +724,9 @@ Remote token 模式不需要在 Skill 中再次配置 `integrator_id`、`secret_
 3. 查询“工业机器人”相关的高新技术下游企业
 
 ### advanced_filter_get_enterprise_list (高级筛选获取企业清单)
-1. 查询广东省营业状态且名称包含“无人机”的企业清单
-2. 筛选高端装备制造相关企业并返回企业列表
-3. 查询成立时间在2020年后的机器人相关企业
+1. 使用 `address eq [["广东"]]` 查询广东省营业中的无人机相关企业
+2. 组合 `industriesV2`、`businessKeywords`、`business` 与 `desc` 筛选高端装备制造企业
+3. 使用 `address eq [["广东","深圳市"]]` 和 `addressValue in ["南山区"]` 查询深圳南山区机器人企业
 
 ### patent_bigdata_patent_search (专利信息搜索)
 1. 搜索关键词为“飞控系统”的专利信息

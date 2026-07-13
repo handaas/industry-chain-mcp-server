@@ -25,7 +25,7 @@ Maintain an open-source MCP server that exposes existing HandaaS data products f
 
 ## Tool and product registry
 
-`PRODUCT_IDS` and `PRODUCT_NAMES` in `server/mcp_server.py` are the source of truth. The current service exposes 24 HandaaS wrappers in these groups:
+`PRODUCT_IDS` and `PRODUCT_NAMES` in `server/mcp_server.py` are the source of truth. The current service exposes 24 MCP tools backed by 25 HandaaS products in these groups:
 
 - Enterprise discovery and profile
 - Supply-chain downstream products and enterprises
@@ -48,7 +48,12 @@ Do not expose arbitrary `product_id` execution as a generic MCP tool.
 
 - Pagination starts at `pageIndex=1`.
 - General list products cap `pageSize` at 50.
-- Advanced-filter list/count wrappers cap `pageSize` at 10 according to the current product contract.
+- Legacy flat advanced-filter list/count calls cap `pageSize` at 10.
+- `advanced_filter_get_enterprise_list` and `advanced_filter_get_enterprise_count` also accept a full high-screen `filter` condition object and route it to product `690dcb1b9c9dc8d0ff3c40eb`.
+- Full high-screen `params.filter` must be a compact JSON string at the HandaaS boundary. MCP clients may pass an object or JSON string; normalize exactly once before `call_api`.
+- High-screen top-level groups are `must` / `should` only. Reject `must_not` because the upstream product silently ignores it; exclusions use field-level `nin` / `neq` inside `must`.
+- Tree-enum fields such as `address`, `industriesV2`, `operStatus_v2`, and `enterpriseType` use list-of-paths values for `eq` / `neq`. Address province names normalize to platform province abbreviations, e.g. `广东省` -> `广东`.
+- Full high-screen condition mode returns the total and the first 50 rows and does not support `pageIndex` / `pageSize`; reject mixed flat/condition calls rather than silently dropping arguments. Legacy flat list mode remains paginated up to 500 rows.
 - Invalid negative/zero pagination returns a structured `参数错误` without calling upstream.
 - `bid_bigdata_bid_search.biddingType` and `biddingRegion` accept JSON arrays or legal JSON strings and are normalized before upstream calls.
 - `policy_bigdata_policy_search.address` accepts list/list JSON or simple region strings and is normalized to HandaaS list-of-list JSON.
