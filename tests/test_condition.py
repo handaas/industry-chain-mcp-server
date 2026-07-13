@@ -64,6 +64,7 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertIn("businessTags", common_fields)
         self.assertIn("ecShopProducts", common_fields)
         self.assertIn("multi_field_condition_objects", guide["compatibility"])
+        self.assertIn("fixed_filter_first_page", guide["compatibility"])
         for group in guide["common_dimensions"]:
             for item in group["fields"]:
                 normalized = high_screen.normalize_filter({"must": [item["example_condition"]]})
@@ -531,6 +532,51 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         )
         self.assertEqual(result["error"], "参数冲突")
         self.assertEqual(result["conflicting_fields"], ["name"])
+
+    def test_high_screen_accepts_fixed_first_fifty_page_sentinel(self):
+        captured = {}
+        original = server.call_api
+
+        def fake_call_api(product_id, params=None):
+            captured["product_id"] = product_id
+            captured["params"] = params or {}
+            return {"resultList": [], "total": 0}
+
+        try:
+            server.call_api = fake_call_api
+            result = server.advanced_filter_get_enterprise_list(
+                filter={
+                    "must": [{
+                        "operStatus_v2": [{"eq": [["营业"]]}],
+                        "address": [{"eq": [["广东"]]}],
+                        "businessKeywords": [{"in": ["无人机"]}],
+                    }]
+                },
+                pageIndex=1,
+                pageSize=50,
+            )
+        finally:
+            server.call_api = original
+
+        self.assertEqual(result, {"resultList": [], "total": 0})
+        self.assertEqual(captured["product_id"], server.PRODUCT_IDS["advanced_filter_condition_list"])
+        self.assertEqual(set(captured["params"]), {"filter"})
+
+    def test_high_screen_rejects_real_pagination_in_filter_mode(self):
+        second_page = server.advanced_filter_get_enterprise_list(
+            filter={"must": [{"name": [{"in": ["无人机"]}]}]},
+            pageIndex=2,
+            pageSize=50,
+        )
+        unsupported_size = server.advanced_filter_get_enterprise_list(
+            filter={"must": [{"name": [{"in": ["无人机"]}]}]},
+            pageSize=20,
+        )
+
+        self.assertEqual(second_page["error"], "参数冲突")
+        self.assertEqual(unsupported_size["error"], "参数冲突")
+        self.assertIn("pageIndex=1", second_page["message"])
+        self.assertIn("pageSize=50", unsupported_size["message"])
 
     def test_high_screen_count_uses_full_condition_product_total(self):
         captured = {}

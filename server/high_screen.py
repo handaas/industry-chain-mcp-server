@@ -278,6 +278,10 @@ def high_screen_common_guide() -> Dict[str, Any]:
                 "同一 must/should 数组项中的多字段对象会按原顺序自动拆分为单字段条件；"
                 "例如 must:[{a:[...],b:[...]}] 归一化为 must:[{a:[...]},{b:[...]}]。"
             ),
+            "fixed_filter_first_page": (
+                "完整 filter 产品固定返回第一页前50条；pageIndex 仅接受1，"
+                "pageSize 可保留工具默认值10或显式传50，且不会转发分页字段。"
+            ),
         },
         "common_dimensions": groups,
         "query_examples": {

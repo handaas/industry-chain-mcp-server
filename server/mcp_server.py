@@ -371,11 +371,13 @@ def _validate_advanced_filter_mode(
             field="filter",
             conflicting_fields=sorted(flat_params),
         )
-    if page_index != 1 or page_size != 10:
+    valid_page_index = isinstance(page_index, int) and not isinstance(page_index, bool) and page_index == 1
+    valid_page_size = isinstance(page_size, int) and not isinstance(page_size, bool) and page_size in {10, 50}
+    if not valid_page_index or not valid_page_size:
         return None, _api_error(
             product_id,
             "参数冲突",
-            "完整高筛条件组产品返回总命中数和前50条清单，不支持 pageIndex/pageSize；请保留默认值。",
+            "完整高筛条件组固定返回第一页前50条；仅接受 pageIndex=1，以及 pageSize=10（默认）或 pageSize=50。",
             field="pageIndex/pageSize",
         )
     return _normalize_high_screen_filter(product_id, filter_value)
@@ -688,7 +690,8 @@ def advanced_filter_get_enterprise_count(
     注意:
     - filter 顶层只支持 must/should。
     - 排除条件使用字段级 nin/neq 并放入 must，不能使用 must_not。
-    - filter 不能与扁平字段或非默认分页参数混用。
+    - filter 不能与扁平字段混用；完整条件组固定返回前50条，pageIndex 仅支持1，
+      pageSize 可保留默认值10或显式传50。
     """
     flat_params = _advanced_filter_flat_params(
         operStatus=operStatus,
@@ -765,6 +768,7 @@ def advanced_filter_get_enterprise_list(
     排除条件必须使用字段级 nin/neq，不能使用顶层 must_not。
     完整条件组产品返回总命中数与前50条企业；旧版扁平模式可分页获取最多500条。
     推荐每个 must/should 数组项只写一个字段；若模型传入多字段对象，MCP 会按原顺序自动拆分为单字段条件。
+    filter 模式固定返回第一页前50条，接受 pageIndex=1 和 pageSize=10（默认）或 pageSize=50；不向上游转发分页字段。
 
     扁平模式参数:
     - operStatus: 营业状态。多个状态用逗号分隔；排除状态使用 !，例如“营业”或“!吊销”。
@@ -780,7 +784,8 @@ def advanced_filter_get_enterprise_list(
     - foundTimeGte/foundTimeLte: 成立日期下限/上限，格式 YYYY-MM-DD。
     - regCapitalRmbGte/regCapitalRmbLte: 注册资本范围，单位万元。
     - totalPayAmountGte/totalPayAmountLte: 实缴资本范围，单位万元。
-    - pageIndex/pageSize: 页码从1开始，每页最多10条。
+    - pageIndex/pageSize: 扁平模式页码从1开始、每页最多10条；filter 模式只接受
+      pageIndex=1，pageSize 可为默认10或固定返回量50。
 
     “查询广东省营业状态且名称包含无人机的企业清单”可直接使用扁平参数：
     operStatus="营业", address="广东省", name="无人机"。
