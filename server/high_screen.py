@@ -14,6 +14,38 @@ MAX_DEPTH = 12
 MAX_CONDITIONS = 500
 MAX_FILTER_CHARS = 200_000
 
+COMMON_DIMENSION_GROUPS = (
+    ("企业基础", ("name", "operStatus_v2", "address", "addressValue", "enterpriseType", "foundTime", "industriesV2")),
+    ("主营业务与产品", ("businessKeywords", "businessTags", "business", "desc", "ecShopProducts", "brandProductList")),
+    ("规模与资本", ("regCapitalRmb", "totalPayAmount", "enterpriseScaleAlgV2", "annualTurnoverAlgV2", "arInsuranceNumber")),
+    ("成长与资质", ("isHighTechEnt", "isSpecializedAndNewV2", "isSpecializedAndNewGiantV2", "isUnicornEnt", "hasStock", "isTopEnterprise", "financingSeries")),
+    ("知识产权与市场", ("hasPatent", "patentNumber", "patentNameList", "hasBidding", "biddingAnncTitleList")),
+)
+
+COMMON_FIELD_EXAMPLES = {
+    "name": ("in", ["无人机"]),
+    "operStatus_v2": ("eq", [["营业"]]),
+    "address": ("eq", [["广东"]]),
+    "addressValue": ("in", ["南山区"]),
+    "enterpriseType": ("eq", [["民营"]]),
+    "foundTime": ("gte", "2020-01-01"),
+    "industriesV2": ("eq", [["制造业"]]),
+    "businessKeywords": ("in", ["无人机"]),
+    "businessTags": ("in", ["无人机"]),
+    "business": ("in", ["无人机"]),
+    "desc": ("in", ["无人机"]),
+    "ecShopProducts": ("in", ["无人机"]),
+    "brandProductList": ("in", ["无人机"]),
+    "regCapitalRmb": ("gte", 1000),
+    "totalPayAmount": ("gte", 100),
+    "enterpriseScaleAlgV2": ("gte", 50),
+    "annualTurnoverAlgV2": ("gte", 1000),
+    "arInsuranceNumber": ("gte", 50),
+    "patentNumber": ("gte", 1),
+    "patentNameList": ("in", ["飞控系统"]),
+    "biddingAnncTitleList": ("in", ["无人机"]),
+}
+
 
 class HighScreenValidationError(ValueError):
     """Condition validation error with an actionable JSON path."""
@@ -96,6 +128,181 @@ def option_values(options_from: str) -> frozenset[str]:
     return frozenset(segment for path in option_paths(options_from) for segment in path)
 
 
+def _sorted_option_paths(options_from: str) -> list[list[str]]:
+    return [
+        list(path)
+        for path in sorted(option_paths(options_from), key=lambda item: (len(item), item))
+    ]
+
+
+def _field_summary(field: str, definition: Dict[str, Any]) -> Dict[str, Any]:
+    action_type = str(definition.get("action", {}).get("type"))
+    input_config = definition.get("input", {})
+    operators = load_field_config()["condition_contract"]["action_type_operators"].get(action_type, [])
+    return {
+        "field": field,
+        "label": definition.get("label") or field,
+        "category_path": definition.get("category_path") or [],
+        "operators": operators,
+        "action_type": action_type,
+        "input_type": input_config.get("type"),
+        "options_from": input_config.get("options_from"),
+        "unit": definition.get("unit"),
+        "default_can_use": bool(definition.get("default_can_use")),
+        "hint": definition.get("hint"),
+    }
+
+
+def _generic_example(field: str, definition: Dict[str, Any]) -> Dict[str, Any]:
+    configured = COMMON_FIELD_EXAMPLES.get(field)
+    if configured:
+        operator, value = configured
+        return {field: [{operator: value}]}
+
+    action_type = str(definition.get("action", {}).get("type"))
+    input_config = definition.get("input", {})
+    options_from = str(input_config.get("options_from") or "")
+    examples = _sorted_option_paths(options_from)[:1] if options_from else []
+    if action_type == "0":
+        value: Any = "2020-01-01" if input_config.get("type") == 6 else input_config.get("min", 1)
+        operator = "gte"
+    elif action_type == "1":
+        value = "1"
+        operator = "exist"
+    elif action_type == "3":
+        value = examples or [["选项路径"]]
+        operator = "eq"
+    elif action_type in {"2", "9", "10"}:
+        value = [examples[0][-1]] if examples else ["选项"]
+        operator = "in"
+    elif action_type in {"4", "7"}:
+        value = ["关键词"]
+        operator = "in"
+    else:
+        value = "配置值"
+        operator = "eq"
+    return {field: [{operator: value}]}
+
+
+def high_screen_field_usage(field: str) -> Dict[str, Any]:
+    """Return the configured operators, shape, examples and options for one field."""
+    definition = field_definition(field)
+    if definition is None:
+        matches = get_close_matches(field, load_field_config()["fields"].keys(), n=5, cutoff=0.4)
+        return {
+            "error": "未知高筛字段",
+            "field": field,
+            "suggestions": matches,
+            "catalog_resource": "handaas://high-screen/fields",
+        }
+
+    detail = _field_summary(field, definition)
+    input_config = definition.get("input", {})
+    options_from = str(input_config.get("options_from") or "")
+    option_examples = _sorted_option_paths(options_from) if options_from else []
+    detail.update({
+        "example_condition": _generic_example(field, definition),
+        "input_constraints": {
+            key: input_config[key]
+            for key in ("min", "max", "maxLength", "maxKeywordLength", "placeholder")
+            if key in input_config
+        },
+        "option_path_count": len(option_examples),
+        "option_examples": option_examples[:12],
+        "options_resource": f"handaas://high-screen/options/{options_from}" if options_from else None,
+        "correlation_dimensions": definition.get("correlation_dimension") or [],
+    })
+    return detail
+
+
+def high_screen_field_catalog() -> Dict[str, Any]:
+    """Return a compact catalog of every configured high-screen dimension."""
+    fields = load_field_config()["fields"]
+    summaries = [_field_summary(field, definition) for field, definition in fields.items()]
+    summaries.sort(key=lambda item: (item["category_path"], item["label"], item["field"]))
+    category_counts: Dict[str, int] = {}
+    for item in summaries:
+        category = " / ".join(item["category_path"]) or "未分类"
+        category_counts[category] = category_counts.get(category, 0) + 1
+    return {
+        "schema_version": 1,
+        "platform_config_version": config_version(),
+        "field_count": len(summaries),
+        "category_counts": category_counts,
+        "field_detail_template": "handaas://high-screen/fields/{field}",
+        "fields": summaries,
+    }
+
+
+def high_screen_option_catalog(source: str) -> Dict[str, Any]:
+    """Return every configured path for one enum/tree option source."""
+    options = load_option_config()["options"]
+    if source not in options:
+        return {
+            "error": "未知高筛选项源",
+            "source": source,
+            "suggestions": get_close_matches(source, options.keys(), n=5, cutoff=0.4),
+        }
+    paths = _sorted_option_paths(source)
+    return {
+        "schema_version": 1,
+        "platform_config_version": config_version(),
+        "source": source,
+        "path_count": len(paths),
+        "paths": paths,
+    }
+
+
+def high_screen_common_guide() -> Dict[str, Any]:
+    """Return common dimensions, examples and the recommended discovery flow."""
+    groups = []
+    for label, fields in COMMON_DIMENSION_GROUPS:
+        groups.append({
+            "group": label,
+            "fields": [high_screen_field_usage(field) for field in fields],
+        })
+    return {
+        "schema_version": 1,
+        "platform_config_version": config_version(),
+        "purpose": "查询高筛支持的维度和用法；条件规划与 ES/filter 拼装由伴随 Skill 负责。",
+        "workflow": [
+            "先读取 handaas://high-screen/guide 选择常用维度。",
+            "需要完整清单时读取 handaas://high-screen/fields。",
+            "读取 handaas://high-screen/fields/{field} 获取操作符、值形状和示例。",
+            "枚举字段再读取 handaas://high-screen/options/{source} 获取合法路径。",
+            "由 companion Skill 组装 must/should filter，再调用 advanced_filter_get_enterprise_list。",
+        ],
+        "rules": load_field_config()["condition_contract"],
+        "common_dimensions": groups,
+        "query_examples": {
+            "广东营业且名称含无人机": {
+                "must": [
+                    {"operStatus_v2": [{"eq": [["营业"]]}]},
+                    {"address": [{"eq": [["广东"]]}]},
+                    {"name": [{"in": ["无人机"]}]},
+                ]
+            },
+            "无人机主营业务多证据召回": {
+                "must": [
+                    {"operStatus_v2": [{"eq": [["营业"]]}]},
+                    {"should": [
+                        {"businessKeywords": [{"in": ["无人机"]}]},
+                        {"businessTags": [{"in": ["无人机"]}]},
+                        {"business": [{"in": ["无人机"]}]},
+                        {"desc": [{"in": ["无人机"]}]},
+                        {"ecShopProducts": [{"in": ["无人机"]}]},
+                    ]},
+                ]
+            },
+        },
+        "resources": {
+            "field_catalog": "handaas://high-screen/fields",
+            "field_detail": "handaas://high-screen/fields/{field}",
+            "option_paths": "handaas://high-screen/options/{source}",
+        },
+    }
+
+
 def _nearest(values: Iterable[str], target: str) -> str:
     matches = get_close_matches(target, list(values), n=3, cutoff=0.55)
     return f"；相近值：{', '.join(matches)}" if matches else ""
@@ -173,6 +380,30 @@ def _normalize_path_value(field: str, definition: Dict[str, Any], value: Any, pa
             )
         normalized.append(clean)
     return normalized
+
+
+def normalize_legacy_address_paths(value: Any, path: str = "address") -> list[list[str]]:
+    """Validate legacy flat-filter addresses and restore official province names.
+
+    Full high-screen filters use platform tree values such as ``广东``. The
+    legacy advanced-filter products instead expect a JSON string containing
+    paths such as ``[["广东省"], ["广东省", "深圳市"]]``.
+    """
+    definition = field_definition("address")
+    if definition is None:
+        raise RuntimeError("Bundled address field config is missing.")
+    normalized = _normalize_path_value("address", definition, value, path)
+    aliases = (
+        load_field_config()
+        .get("normalizations", {})
+        .get("option_aliases", {})
+        .get("address", {})
+    )
+    official_names = {canonical: alias for alias, canonical in aliases.items()}
+    return [
+        [official_names.get(segments[0], segments[0]), *segments[1:]]
+        for segments in normalized
+    ]
 
 
 def _normalize_keyword_values(

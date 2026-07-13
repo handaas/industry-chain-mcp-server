@@ -23,6 +23,73 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertEqual(payload["ready"], payload["credentials_configured"])
         self.assertNotIn("secret", response.body.decode("utf-8").lower())
 
+    def test_advanced_filter_list_tool_describes_and_accepts_address_forms(self):
+        tools = asyncio.run(server.mcp.list_tools())
+        tool = next(item for item in tools if item.name == "advanced_filter_get_enterprise_list")
+
+        self.assertIn('address="广东省"', tool.description)
+        self.assertIn('[["广东省"]]', tool.description)
+        self.assertIn('不能只写“深圳市”', tool.description)
+        self.assertIn("businessKeywords", tool.description)
+        self.assertIn("businessTags", tool.description)
+        self.assertIn("handaas://high-screen/guide", tool.description)
+        address_types = {
+            option.get("type")
+            for option in tool.inputSchema["properties"]["address"]["anyOf"]
+        }
+        self.assertIn("string", address_types)
+        self.assertIn("array", address_types)
+
+    def test_high_screen_resources_expose_catalog_field_usage_and_options(self):
+        resources = asyncio.run(server.mcp.list_resources())
+        resource_uris = {str(resource.uri) for resource in resources}
+        self.assertIn("handaas://high-screen/guide", resource_uris)
+        self.assertIn("handaas://high-screen/fields", resource_uris)
+
+        templates = asyncio.run(server.mcp.list_resource_templates())
+        template_uris = {template.uriTemplate for template in templates}
+        self.assertIn("handaas://high-screen/fields/{field}", template_uris)
+        self.assertIn("handaas://high-screen/options/{source}", template_uris)
+
+        guide_contents = asyncio.run(server.mcp.read_resource("handaas://high-screen/guide"))
+        guide = json.loads(guide_contents[0].content)
+        common_fields = {
+            item["field"]
+            for group in guide["common_dimensions"]
+            for item in group["fields"]
+        }
+        self.assertIn("businessKeywords", common_fields)
+        self.assertIn("businessTags", common_fields)
+        self.assertIn("ecShopProducts", common_fields)
+        for group in guide["common_dimensions"]:
+            for item in group["fields"]:
+                normalized = high_screen.normalize_filter({"must": [item["example_condition"]]})
+                self.assertIsInstance(normalized, str)
+        for condition in guide["query_examples"].values():
+            self.assertIsInstance(high_screen.normalize_filter(condition), str)
+
+        catalog_contents = asyncio.run(server.mcp.read_resource("handaas://high-screen/fields"))
+        catalog = json.loads(catalog_contents[0].content)
+        self.assertEqual(catalog["field_count"], 369)
+        self.assertTrue(any(item["field"] == "name" for item in catalog["fields"]))
+
+        detail_contents = asyncio.run(
+            server.mcp.read_resource("handaas://high-screen/fields/businessTags")
+        )
+        detail = json.loads(detail_contents[0].content)
+        self.assertEqual(detail["label"], "主营业务")
+        self.assertEqual(detail["operators"], ["in", "nin"])
+        self.assertEqual(
+            detail["example_condition"],
+            {"businessTags": [{"in": ["无人机"]}]},
+        )
+
+        option_contents = asyncio.run(
+            server.mcp.read_resource("handaas://high-screen/options/operStatus_v2")
+        )
+        option_detail = json.loads(option_contents[0].content)
+        self.assertIn(["营业"], option_detail["paths"])
+
     def test_missing_credentials_returns_actionable_error(self):
         original = (server.INTEGRATOR_ID, server.SECRET_ID, server.SECRET_KEY)
         try:
@@ -196,6 +263,72 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertEqual(captured["params"]["pageIndex"], 2)
         self.assertEqual(captured["params"]["pageSize"], 10)
         self.assertNotIn("product_id", captured["params"])
+
+    def test_advanced_filter_list_normalizes_simple_address_for_upstream(self):
+        captured = {}
+        original = server.call_api
+
+        def fake_call_api(product_id, params=None):
+            captured["product_id"] = product_id
+            captured["params"] = params or {}
+            return {"resultList": [], "total": 0}
+
+        try:
+            server.call_api = fake_call_api
+            result = server.advanced_filter_get_enterprise_list(
+                operStatus="营业",
+                address="广东省",
+                name="无人机",
+            )
+        finally:
+            server.call_api = original
+
+        self.assertEqual(result, {"resultList": [], "total": 0})
+        self.assertEqual(captured["product_id"], server.PRODUCT_IDS["advanced_filter_list"])
+        self.assertEqual(captured["params"]["address"], '[["广东省"]]')
+        self.assertEqual(captured["params"]["operStatus"], "营业")
+        self.assertEqual(captured["params"]["name"], "无人机")
+
+    def test_advanced_filter_list_accepts_address_arrays_and_path_strings(self):
+        captured = []
+        original = server.call_api
+
+        def fake_call_api(product_id, params=None):
+            captured.append((product_id, params or {}))
+            return {"resultList": [], "total": 0}
+
+        try:
+            server.call_api = fake_call_api
+            server.advanced_filter_get_enterprise_list(
+                address=[["北京市"], ["广东省", "广州市"]],
+            )
+            server.advanced_filter_get_enterprise_list(
+                address="广东省,深圳市;江苏省,南京市",
+            )
+        finally:
+            server.call_api = original
+
+        self.assertEqual(
+            captured[0][1]["address"],
+            '[["北京市"],["广东省","广州市"]]',
+        )
+        self.assertEqual(
+            captured[1][1]["address"],
+            '[["广东省","深圳市"],["江苏省","南京市"]]',
+        )
+
+    def test_advanced_filter_list_rejects_city_without_province(self):
+        original = server.call_api
+        try:
+            server.call_api = lambda *args, **kwargs: self.fail("upstream must not be called")
+            result = server.advanced_filter_get_enterprise_list(address="深圳市")
+        finally:
+            server.call_api = original
+
+        self.assertEqual(result["error"], "参数错误")
+        self.assertEqual(result["field"], "address")
+        self.assertEqual(result["product_key"], "advanced_filter_list")
+        self.assertIn("省级路径", result["message"])
 
     def test_high_screen_object_is_validated_and_compacted_for_upstream(self):
         captured = {}

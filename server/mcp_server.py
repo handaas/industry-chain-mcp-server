@@ -24,13 +24,24 @@ from starlette.responses import JSONResponse
 if __package__ in {None, ""}:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from server.high_screen import HighScreenValidationError, normalize_filter
+from server.high_screen import (
+    HighScreenValidationError,
+    high_screen_common_guide,
+    high_screen_field_catalog,
+    high_screen_field_usage,
+    high_screen_option_catalog,
+    normalize_filter,
+    normalize_legacy_address_paths,
+)
 
 load_dotenv()
 
 DESCRIPTION = """
 该MCP服务提供产业链分析相关的HandaaS数据接口封装，包括企业关键词搜索、企业基础信息、供应链下游产品与企业、专利信息、招投标信息、政策大数据和高级企业筛选等。
 所有可用工具均为HandaaS已有数据接口的MCP封装。
+高级筛选前可读取 handaas://high-screen/guide、handaas://high-screen/fields、
+handaas://high-screen/fields/{field} 和 handaas://high-screen/options/{source} 资源了解字段用法。
+条件规划与 ES/filter 拼装属于伴随 Skill；MCP 工具只负责执行现有 HandaaS 数据产品。
 """
 
 INTEGRATOR_ID = os.environ.get("INTEGRATOR_ID")
@@ -48,6 +59,54 @@ mcp = FastMCP(
     host=MCP_HOST,
     port=MCP_PORT,
 )
+
+
+def _json_resource(payload: Dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+@mcp.resource(
+    "handaas://high-screen/guide",
+    name="high_screen_common_guide",
+    title="HandaaS 高筛常用维度指南",
+    description="常用企业筛选维度、操作符、示例和推荐的资源发现流程。",
+    mime_type="application/json",
+)
+def high_screen_common_guide_resource() -> str:
+    return _json_resource(high_screen_common_guide())
+
+
+@mcp.resource(
+    "handaas://high-screen/fields",
+    name="high_screen_field_catalog",
+    title="HandaaS 高筛完整字段目录",
+    description="配置版本内全部高筛字段、分类、操作符、输入类型和枚举来源。",
+    mime_type="application/json",
+)
+def high_screen_field_catalog_resource() -> str:
+    return _json_resource(high_screen_field_catalog())
+
+
+@mcp.resource(
+    "handaas://high-screen/fields/{field}",
+    name="high_screen_field_usage",
+    title="HandaaS 高筛字段用法",
+    description="按字段名读取操作符、输入约束、示例条件及枚举资源地址。",
+    mime_type="application/json",
+)
+def high_screen_field_usage_resource(field: str) -> str:
+    return _json_resource(high_screen_field_usage(field))
+
+
+@mcp.resource(
+    "handaas://high-screen/options/{source}",
+    name="high_screen_option_catalog",
+    title="HandaaS 高筛枚举路径",
+    description="按 options_from 名称读取完整合法枚举或树形路径。",
+    mime_type="application/json",
+)
+def high_screen_option_catalog_resource(source: str) -> str:
+    return _json_resource(high_screen_option_catalog(source))
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -212,6 +271,52 @@ def _normalize_policy_address_param(value: Any) -> tuple[Optional[str], Optional
         parts = [part.strip() for part in raw.replace("，", ",").split(",") if part.strip()]
         return json.dumps([parts or [raw]], ensure_ascii=False), None
     return None, {"error": "address格式错误，请输入list、JSON字符串或地区名称"}
+
+
+def _normalize_advanced_filter_address_param(
+    product_id: str,
+    value: Any,
+) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Normalize legacy advanced-filter address input to list-of-paths JSON."""
+    if value is None:
+        return None, None
+    parsed = value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None, None
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                return None, _api_error(
+                    product_id,
+                    "参数错误",
+                    'address 必须是合法的二维地区路径 JSON，例如 [["广东省"]]。',
+                    field="address",
+                    path=f"字符位置 {exc.pos}",
+                )
+        else:
+            parsed = raw
+    elif not isinstance(value, list):
+        return None, _api_error(
+            product_id,
+            "参数错误",
+            'address 必须是地区字符串、JSON 数组字符串或二维路径数组，例如 "广东省" 或 [["广东省"]]。',
+            field="address",
+        )
+
+    try:
+        paths = normalize_legacy_address_paths(parsed)
+    except HighScreenValidationError as exc:
+        return None, _api_error(
+            product_id,
+            "参数错误",
+            f"address 格式错误；非直辖市必须包含省级路径，例如广东省或广东省,深圳市：{exc}",
+            field="address",
+            path=exc.path,
+        )
+    return json.dumps(paths, ensure_ascii=False, separators=(",", ":")), None
 
 
 def _signature(call_params: Dict[str, Any], secret_key: str) -> str:
@@ -548,7 +653,7 @@ def supply_get_down_stream_enterprises(
 def advanced_filter_get_enterprise_count(
     filter: Optional[Union[str, Dict[str, Any]]] = None,
     operStatus: Optional[str] = None,
-    address: Optional[str] = None,
+    address: Optional[Union[str, list]] = None,
     industries: Optional[str] = None,
     enterpriseType: Optional[str] = None,
     name: Optional[str] = None,
@@ -570,7 +675,9 @@ def advanced_filter_get_enterprise_count(
     请求参数:
     - filter: 完整高筛条件组，例如 {"must":[{"operStatus_v2":[{"eq":[["营业"]]}]}]}
     - operStatus: 营业状态，例如“营业,吊销”或“!吊销”
-    - address: 地址筛选条件
+    - address: 仅扁平模式使用。上游格式是二维地区路径 JSON 字符串，例如
+      [["广东省"]] 或 [["北京市"],["广东省","广州市"]]。也可直接传
+      "广东省"、"广东省,深圳市" 或对应数组，MCP 会校验并转换。
     - industries: 行业筛选条件
     - enterpriseType: 企业类型筛选条件
     - name: 企业名称筛选条件
@@ -619,6 +726,13 @@ def advanced_filter_get_enterprise_count(
             return _api_error(product_id, "响应格式错误", "高筛接口返回的 total 不是整数。")
 
     product_id = PRODUCT_IDS["advanced_filter_count"]
+    normalized_address, address_error = _normalize_advanced_filter_address_param(product_id, address)
+    if address_error:
+        return address_error
+    if normalized_address is None:
+        flat_params.pop("address", None)
+    else:
+        flat_params["address"] = normalized_address
     page, error = _normalize_pagination(product_id, pageIndex, pageSize, max_page_size=10)
     if error:
         return error
@@ -630,7 +744,7 @@ def advanced_filter_get_enterprise_count(
 def advanced_filter_get_enterprise_list(
     filter: Optional[Union[str, Dict[str, Any]]] = None,
     operStatus: Optional[str] = None,
-    address: Optional[str] = None,
+    address: Optional[Union[str, list]] = None,
     industries: Optional[str] = None,
     enterpriseType: Optional[str] = None,
     name: Optional[str] = None,
@@ -650,6 +764,51 @@ def advanced_filter_get_enterprise_list(
     filter 可以是 JSON object 或 JSON 字符串，顶层只允许 must/should。
     排除条件必须使用字段级 nin/neq，不能使用顶层 must_not。
     完整条件组产品返回总命中数与前50条企业；旧版扁平模式可分页获取最多500条。
+
+    扁平模式参数:
+    - operStatus: 营业状态。多个状态用逗号分隔；排除状态使用 !，例如“营业”或“!吊销”。
+    - address: 注册地区。上游要求二维地区路径 JSON 字符串；本工具同时接受以下常见输入并自动转换：
+      1. 省份字符串："广东省" -> [["广东省"]]
+      2. 省市路径字符串："广东省,深圳市" -> [["广东省","深圳市"]]
+      3. 多地区字符串："北京市;广东省,广州市"
+      4. JSON 字符串或数组：[["北京市"],["广东省","广州市"]]
+      直辖市可单独写“北京市/上海市/天津市/重庆市”；其他城市必须带省份，不能只写“深圳市”。
+    - industries: 行业；多个值用逗号分隔，排除值前加 !。
+    - enterpriseType: 企业类型；多个值用逗号分隔，排除值前加 !。
+    - name: 企业名称包含/排除关键词，例如“无人机”或“汽车,!专卖店”。
+    - foundTimeGte/foundTimeLte: 成立日期下限/上限，格式 YYYY-MM-DD。
+    - regCapitalRmbGte/regCapitalRmbLte: 注册资本范围，单位万元。
+    - totalPayAmountGte/totalPayAmountLte: 实缴资本范围，单位万元。
+    - pageIndex/pageSize: 页码从1开始，每页最多10条。
+
+    “查询广东省营业状态且名称包含无人机的企业清单”可直接使用扁平参数：
+    operStatus="营业", address="广东省", name="无人机"。
+
+    filter 模式中的 address 格式不同，使用平台树形值（省级不带“省”）：
+    {"must":[
+      {"operStatus_v2":[{"eq":[["营业"]]}]},
+      {"address":[{"eq":[["广东"]]}]},
+      {"name":[{"in":["无人机"]}]}
+    ]}
+    不要把 filter 与 operStatus/address/name 等扁平参数混用。
+
+    常用 filter 筛选维度:
+    - 企业基础: name（企业名称）、operStatus_v2（营业状态）、address/addressValue、
+      enterpriseType、foundTime、industriesV2（所属行业）。
+    - 主营业务与产品: businessKeywords（业务关键词）、businessTags（主营业务）、
+      business（经营范围）、desc（企业简介）、ecShopProducts（电商主营产品）、
+      brandProductList（品牌主营产品）。关键词字段使用 in/nin 字符串数组。
+    - 规模资本: regCapitalRmb、totalPayAmount、enterpriseScaleAlgV2、
+      annualTurnoverAlgV2、arInsuranceNumber，使用 gte/lte/gt/lt。
+    - 资质成长: isHighTechEnt、isSpecializedAndNewV2、isUnicornEnt、hasStock、
+      hasPatent、hasBidding 等存在型字段，使用 exist="1"/"0"。
+
+    查询更多维度及其合法操作符、值形状和枚举路径时，读取 MCP Resources：
+    - handaas://high-screen/guide：常用维度与组合示例
+    - handaas://high-screen/fields：369 个字段的完整目录
+    - handaas://high-screen/fields/{field}：单字段详细用法
+    - handaas://high-screen/options/{source}：枚举/树形字段合法路径
+    条件规划和 filter 拼装由伴随 Skill 完成，本工具执行拼装后的 filter。
 
     示例:
     {"must":[
@@ -688,6 +847,13 @@ def advanced_filter_get_enterprise_list(
         return call_api(product_id, {"filter": filter_string})
 
     product_id = PRODUCT_IDS["advanced_filter_list"]
+    normalized_address, address_error = _normalize_advanced_filter_address_param(product_id, address)
+    if address_error:
+        return address_error
+    if normalized_address is None:
+        flat_params.pop("address", None)
+    else:
+        flat_params["address"] = normalized_address
     page, error = _normalize_pagination(product_id, pageIndex, pageSize, max_page_size=10)
     if error:
         return error
