@@ -33,6 +33,8 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertIn("businessKeywords", tool.description)
         self.assertIn("businessTags", tool.description)
         self.assertIn("handaas://high-screen/guide", tool.description)
+        self.assertIn("多字段对象", tool.description)
+        self.assertIn("自动拆分", tool.description)
         address_types = {
             option.get("type")
             for option in tool.inputSchema["properties"]["address"]["anyOf"]
@@ -61,6 +63,7 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertIn("businessKeywords", common_fields)
         self.assertIn("businessTags", common_fields)
         self.assertIn("ecShopProducts", common_fields)
+        self.assertIn("multi_field_condition_objects", guide["compatibility"])
         for group in guide["common_dimensions"]:
             for item in group["fields"]:
                 normalized = high_screen.normalize_filter({"must": [item["example_condition"]]})
@@ -361,6 +364,41 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertIsInstance(captured["params"]["filter"], str)
         self.assertEqual(json.loads(captured["params"]["filter"]), condition)
         self.assertNotIn(" ", captured["params"]["filter"])
+
+    def test_high_screen_splits_multiple_fields_in_one_must_condition(self):
+        captured = {}
+        original = server.call_api
+        condition = {
+            "must": [{
+                "operStatus_v2": [{"eq": [["营业"]]}],
+                "address": [{"eq": [["广东"]]}],
+                "businessKeywords": [{"in": ["无人机"]}],
+            }]
+        }
+
+        def fake_call_api(product_id, params=None):
+            captured["product_id"] = product_id
+            captured["params"] = params or {}
+            return {"resultList": [], "total": 0}
+
+        try:
+            server.call_api = fake_call_api
+            result = server.advanced_filter_get_enterprise_list(filter=condition)
+        finally:
+            server.call_api = original
+
+        self.assertEqual(result, {"resultList": [], "total": 0})
+        self.assertEqual(captured["product_id"], server.PRODUCT_IDS["advanced_filter_condition_list"])
+        self.assertEqual(
+            json.loads(captured["params"]["filter"]),
+            {
+                "must": [
+                    {"operStatus_v2": [{"eq": [["营业"]]}]},
+                    {"address": [{"eq": [["广东"]]}]},
+                    {"businessKeywords": [{"in": ["无人机"]}]},
+                ]
+            },
+        )
 
     def test_high_screen_json_string_is_not_double_encoded(self):
         captured = {}

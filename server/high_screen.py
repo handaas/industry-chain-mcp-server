@@ -273,6 +273,12 @@ def high_screen_common_guide() -> Dict[str, Any]:
             "由 companion Skill 组装 must/should filter，再调用 advanced_filter_get_enterprise_list。",
         ],
         "rules": load_field_config()["condition_contract"],
+        "compatibility": {
+            "multi_field_condition_objects": (
+                "同一 must/should 数组项中的多字段对象会按原顺序自动拆分为单字段条件；"
+                "例如 must:[{a:[...],b:[...]}] 归一化为 must:[{a:[...]},{b:[...]}]。"
+            ),
+        },
         "common_dimensions": groups,
         "query_examples": {
             "广东营业且名称含无人机": {
@@ -575,40 +581,41 @@ def _normalize_group(
         normalized_conditions = []
         for index, condition in enumerate(conditions):
             condition_path = f"{group_path}[{index}]"
-            counter[0] += 1
-            if counter[0] > MAX_CONDITIONS:
-                raise HighScreenValidationError(f"条件数量不能超过 {MAX_CONDITIONS} 个。", condition_path)
-            if not isinstance(condition, dict) or len(condition) != 1:
+            if not isinstance(condition, dict) or not condition:
                 raise HighScreenValidationError(
-                    "每个条件必须只含一个字段或一个嵌套 must/should。",
+                    "每个条件必须是包含字段或嵌套 must/should 的非空 JSON object。",
                     condition_path,
                 )
-            field, rules = next(iter(condition.items()))
-            if field in group_keys:
-                nested = _normalize_group(
-                    {field: rules},
-                    path=condition_path,
-                    depth=depth + 1,
-                    counter=counter,
-                )
-                normalized_conditions.append(nested)
-                continue
-            normalized_field, definition = _normalize_field_name(field, condition_path)
-            if not isinstance(rules, list) or not rules:
-                raise HighScreenValidationError(
-                    "字段条件必须是非空规则数组。",
-                    f"{condition_path}.{normalized_field}",
-                )
-            normalized_rules = [
-                _normalize_rule(
-                    normalized_field,
-                    definition,
-                    rule,
-                    f"{condition_path}.{normalized_field}[{rule_index}]",
-                )
-                for rule_index, rule in enumerate(rules)
-            ]
-            normalized_conditions.append({normalized_field: normalized_rules})
+            for field, rules in condition.items():
+                counter[0] += 1
+                field_path = f"{condition_path}.{field}"
+                if counter[0] > MAX_CONDITIONS:
+                    raise HighScreenValidationError(f"条件数量不能超过 {MAX_CONDITIONS} 个。", field_path)
+                if field in group_keys:
+                    nested = _normalize_group(
+                        {field: rules},
+                        path=condition_path,
+                        depth=depth + 1,
+                        counter=counter,
+                    )
+                    normalized_conditions.append(nested)
+                    continue
+                normalized_field, definition = _normalize_field_name(field, field_path)
+                if not isinstance(rules, list) or not rules:
+                    raise HighScreenValidationError(
+                        "字段条件必须是非空规则数组。",
+                        f"{condition_path}.{normalized_field}",
+                    )
+                normalized_rules = [
+                    _normalize_rule(
+                        normalized_field,
+                        definition,
+                        rule,
+                        f"{condition_path}.{normalized_field}[{rule_index}]",
+                    )
+                    for rule_index, rule in enumerate(rules)
+                ]
+                normalized_conditions.append({normalized_field: normalized_rules})
         normalized_group[group_key] = normalized_conditions
     return normalized_group
 

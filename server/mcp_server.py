@@ -764,6 +764,7 @@ def advanced_filter_get_enterprise_list(
     filter 可以是 JSON object 或 JSON 字符串，顶层只允许 must/should。
     排除条件必须使用字段级 nin/neq，不能使用顶层 must_not。
     完整条件组产品返回总命中数与前50条企业；旧版扁平模式可分页获取最多500条。
+    推荐每个 must/should 数组项只写一个字段；若模型传入多字段对象，MCP 会按原顺序自动拆分为单字段条件。
 
     扁平模式参数:
     - operStatus: 营业状态。多个状态用逗号分隔；排除状态使用 !，例如“营业”或“!吊销”。
