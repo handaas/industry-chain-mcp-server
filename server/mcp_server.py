@@ -509,15 +509,14 @@ def _normalize_advanced_filter_flat_params(
     return normalized, None
 
 
-def _validate_advanced_filter_mode(
+def _normalize_advanced_filter_condition_params(
     product_id: str,
     filter_value: Any,
     flat_params: Dict[str, Any],
     page_index: int,
     page_size: int,
-) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
-    if filter_value is None:
-        return None, None
+) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Build the condition product's exact filter and pagination contract."""
     if flat_params:
         return None, _api_error(
             product_id,
@@ -526,16 +525,13 @@ def _validate_advanced_filter_mode(
             field="filter",
             conflicting_fields=sorted(flat_params),
         )
-    valid_page_index = isinstance(page_index, int) and not isinstance(page_index, bool) and page_index == 1
-    valid_page_size = isinstance(page_size, int) and not isinstance(page_size, bool) and page_size in {10, 50}
-    if not valid_page_index or not valid_page_size:
-        return None, _api_error(
-            product_id,
-            "参数冲突",
-            "完整高筛条件组固定返回第一页前50条；仅接受 pageIndex=1，以及 pageSize=10（默认）或 pageSize=50。",
-            field="pageIndex/pageSize",
-        )
-    return _normalize_high_screen_filter(product_id, filter_value)
+    page, error = _normalize_pagination(product_id, page_index, page_size)
+    if error:
+        return None, error
+    filter_string, error = _normalize_high_screen_filter(product_id, filter_value)
+    if error:
+        return None, error
+    return {"filter": filter_string, **(page or {})}, None
 
 
 def call_api(product_id: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -833,8 +829,8 @@ def advanced_filter_get_enterprise_count(
     注意:
     - filter 顶层只支持 must/should。
     - 排除条件使用字段级 nin/neq 并放入 must，不能使用 must_not。
-    - filter 不能与扁平字段混用；完整条件组固定返回前50条，pageIndex 仅支持1，
-      pageSize 可保留默认值10或显式传50。
+    - filter 不能与扁平字段混用。条件组商品只接收 filter、pageIndex、pageSize；
+      pageIndex 从1开始，pageSize 最大50。
     """
     flat_params = _advanced_filter_flat_params(
         operStatus=operStatus,
@@ -851,7 +847,7 @@ def advanced_filter_get_enterprise_count(
     )
     if filter is not None:
         product_id = PRODUCT_IDS["advanced_filter_condition_list"]
-        filter_string, error = _validate_advanced_filter_mode(
+        condition_params, error = _normalize_advanced_filter_condition_params(
             product_id,
             filter,
             flat_params,
@@ -860,7 +856,7 @@ def advanced_filter_get_enterprise_count(
         )
         if error:
             return error
-        result = call_api(product_id, {"filter": filter_string})
+        result = call_api(product_id, condition_params)
         if not isinstance(result, dict) or "error" in result:
             return result
         total = result.get("total")
@@ -905,9 +901,9 @@ def advanced_filter_get_enterprise_list(
     推荐传入完整旷湖高筛条件组 filter；同时兼容旧版扁平字段。
     filter 可以是 JSON object 或 JSON 字符串，顶层只允许 must/should。
     排除条件必须使用字段级 nin/neq，不能使用顶层 must_not。
-    完整条件组产品返回总命中数与前50条企业；旧版扁平模式可分页获取最多500条。
+    完整条件组产品接收 filter、pageIndex、pageSize；旧版扁平模式可分页获取最多500条。
     推荐每个 must/should 数组项只写一个字段；若模型传入多字段对象，MCP 会按原顺序自动拆分为单字段条件。
-    filter 模式固定返回第一页前50条，接受 pageIndex=1 和 pageSize=10（默认）或 pageSize=50；不向上游转发分页字段。
+    filter 模式会把 pageIndex/pageSize 与 filter 一起传给上游；页码从1开始，每页最多50条。
 
     扁平模式参数:
     - operStatus: 营业状态。可传逗号分隔字符串、JSON 字符串数组或字符串数组；排除状态使用 !。
@@ -923,8 +919,7 @@ def advanced_filter_get_enterprise_list(
     - foundTimeGte/foundTimeLte: 成立日期下限/上限，格式 YYYY-MM-DD。
     - regCapitalRmbGte/regCapitalRmbLte: 注册资本范围，单位万元。
     - totalPayAmountGte/totalPayAmountLte: 实缴资本范围，单位万元。
-    - pageIndex/pageSize: 扁平模式页码从1开始、每页最多10条；filter 模式只接受
-      pageIndex=1，pageSize 可为默认10或固定返回量50。
+    - pageIndex/pageSize: 页码从1开始；扁平模式每页最多10条，filter 模式每页最多50条。
 
     “查询广东省营业状态且名称包含无人机的企业清单”可直接使用扁平参数：
     operStatus="营业", address="广东省", name="无人机"。
@@ -980,7 +975,7 @@ def advanced_filter_get_enterprise_list(
     )
     if filter is not None:
         product_id = PRODUCT_IDS["advanced_filter_condition_list"]
-        filter_string, error = _validate_advanced_filter_mode(
+        condition_params, error = _normalize_advanced_filter_condition_params(
             product_id,
             filter,
             flat_params,
@@ -989,7 +984,7 @@ def advanced_filter_get_enterprise_list(
         )
         if error:
             return error
-        return call_api(product_id, {"filter": filter_string})
+        return call_api(product_id, condition_params)
 
     product_id = PRODUCT_IDS["advanced_filter_list"]
     normalized_params, error = _normalize_advanced_filter_flat_params(product_id, flat_params)

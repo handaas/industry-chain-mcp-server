@@ -96,7 +96,7 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertIn("businessTags", common_fields)
         self.assertIn("ecShopProducts", common_fields)
         self.assertIn("multi_field_condition_objects", guide["compatibility"])
-        self.assertIn("fixed_filter_first_page", guide["compatibility"])
+        self.assertIn("filter_pagination", guide["compatibility"])
         for group in guide["common_dimensions"]:
             for item in group["fields"]:
                 normalized = high_screen.normalize_filter({"must": [item["example_condition"]]})
@@ -490,6 +490,9 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertIsInstance(captured["params"]["filter"], str)
         self.assertEqual(json.loads(captured["params"]["filter"]), condition)
         self.assertNotIn(" ", captured["params"]["filter"])
+        self.assertEqual(set(captured["params"]), {"filter", "pageIndex", "pageSize"})
+        self.assertEqual(captured["params"]["pageIndex"], 1)
+        self.assertEqual(captured["params"]["pageSize"], 10)
 
     def test_high_screen_splits_multiple_fields_in_one_must_condition(self):
         captured = {}
@@ -658,7 +661,7 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertEqual(result["error"], "参数冲突")
         self.assertEqual(result["conflicting_fields"], ["name"])
 
-    def test_high_screen_accepts_fixed_first_fifty_page_sentinel(self):
+    def test_high_screen_forwards_filter_pagination_and_only_supported_parameters(self):
         captured = {}
         original = server.call_api
 
@@ -677,7 +680,7 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
                         "businessKeywords": [{"in": ["无人机"]}],
                     }]
                 },
-                pageIndex=1,
+                pageIndex=2,
                 pageSize=50,
             )
         finally:
@@ -685,23 +688,48 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
 
         self.assertEqual(result, {"resultList": [], "total": 0})
         self.assertEqual(captured["product_id"], server.PRODUCT_IDS["advanced_filter_condition_list"])
-        self.assertEqual(set(captured["params"]), {"filter"})
+        self.assertEqual(set(captured["params"]), {"filter", "pageIndex", "pageSize"})
+        self.assertEqual(captured["params"]["pageIndex"], 2)
+        self.assertEqual(captured["params"]["pageSize"], 50)
 
-    def test_high_screen_rejects_real_pagination_in_filter_mode(self):
-        second_page = server.advanced_filter_get_enterprise_list(
-            filter={"must": [{"name": [{"in": ["无人机"]}]}]},
-            pageIndex=2,
-            pageSize=50,
-        )
-        unsupported_size = server.advanced_filter_get_enterprise_list(
-            filter={"must": [{"name": [{"in": ["无人机"]}]}]},
-            pageSize=20,
-        )
+    def test_high_screen_caps_page_size_and_rejects_invalid_pagination(self):
+        captured = {}
+        original = server.call_api
 
-        self.assertEqual(second_page["error"], "参数冲突")
-        self.assertEqual(unsupported_size["error"], "参数冲突")
-        self.assertIn("pageIndex=1", second_page["message"])
-        self.assertIn("pageSize=50", unsupported_size["message"])
+        def fake_call_api(product_id, params=None):
+            captured["params"] = params or {}
+            return {"resultList": [], "total": 0}
+
+        try:
+            server.call_api = fake_call_api
+            capped = server.advanced_filter_get_enterprise_list(
+                filter={"must": [{"name": [{"in": ["无人机"]}]}]},
+                pageIndex=3,
+                pageSize=100,
+            )
+        finally:
+            server.call_api = original
+
+        try:
+            server.call_api = lambda *args, **kwargs: self.fail("upstream must not be called")
+            invalid_index = server.advanced_filter_get_enterprise_list(
+                filter={"must": [{"name": [{"in": ["无人机"]}]}]},
+                pageIndex=0,
+            )
+            invalid_size = server.advanced_filter_get_enterprise_list(
+                filter={"must": [{"name": [{"in": ["无人机"]}]}]},
+                pageSize=0,
+            )
+        finally:
+            server.call_api = original
+
+        self.assertEqual(capped, {"resultList": [], "total": 0})
+        self.assertEqual(captured["params"]["pageIndex"], 3)
+        self.assertEqual(captured["params"]["pageSize"], 50)
+        self.assertEqual(invalid_index["error"], "参数错误")
+        self.assertEqual(invalid_index["field"], "pageIndex")
+        self.assertEqual(invalid_size["error"], "参数错误")
+        self.assertEqual(invalid_size["field"], "pageSize")
 
     def test_high_screen_count_uses_full_condition_product_total(self):
         captured = {}
@@ -723,6 +751,9 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         self.assertEqual(result, {"total": 27})
         self.assertEqual(captured["product_id"], server.PRODUCT_IDS["advanced_filter_condition_list"])
         self.assertIsInstance(captured["params"]["filter"], str)
+        self.assertEqual(set(captured["params"]), {"filter", "pageIndex", "pageSize"})
+        self.assertEqual(captured["params"]["pageIndex"], 1)
+        self.assertEqual(captured["params"]["pageSize"], 10)
 
     def test_invalid_pagination_is_actionable_and_does_not_call_upstream(self):
         original = server.call_api
