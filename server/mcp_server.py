@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import sys
+from datetime import datetime
 from hashlib import md5
 from typing import Any, Dict, Optional, Union
 
@@ -129,7 +131,6 @@ PRODUCT_IDS = {
     "enterprise_keyword_search": "675cea1f0e009a9ea37edaa1",
     "enterprise_base_info": "66dbccbec7a7e3460f5e613f",
     "enterprise_profile": "6682b0b370f56cb7d77701e0",
-    "enterprise_business_info": "66e55613ae988a28c6db9259",
     "enterprise_tags": "669e531ce1fd7bff82321d8d",
     "enterprise_holder_info": "66b485eadaf8c77fb249a441",
     "enterprise_invest_info": "669e5ee54efb02e6f96c7c9c",
@@ -161,7 +162,6 @@ PRODUCT_NAMES = {
     "enterprise_keyword_search": "企业关键词模糊查询",
     "enterprise_base_info": "企业基础信息查询",
     "enterprise_profile": "企业简介查询",
-    "enterprise_business_info": "企业业务信息查询",
     "enterprise_tags": "企业标签信息查询",
     "enterprise_holder_info": "企业控股股东信息查询",
     "enterprise_invest_info": "企业对外投资信息查询",
@@ -319,6 +319,102 @@ def _normalize_advanced_filter_address_param(
     return json.dumps(paths, ensure_ascii=False, separators=(",", ":")), None
 
 
+def _normalize_advanced_filter_string_param(
+    product_id: str,
+    field: str,
+    value: Any,
+) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Normalize legacy comma-delimited filters from strings or JSON arrays."""
+    if value is None:
+        return None, None
+
+    parsed = value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None, None
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                return None, _api_error(
+                    product_id,
+                    "参数错误",
+                    f"{field} 必须是逗号分隔字符串或合法 JSON 字符串数组。",
+                    field=field,
+                    path=f"字符位置 {exc.pos}",
+                )
+        else:
+            return raw, None
+
+    if not isinstance(parsed, list) or not parsed:
+        return None, _api_error(
+            product_id,
+            "参数错误",
+            f"{field} 必须是非空字符串或字符串数组。",
+            field=field,
+        )
+    if not all(isinstance(item, str) and item.strip() for item in parsed):
+        return None, _api_error(
+            product_id,
+            "参数错误",
+            f"{field} 数组只能包含非空字符串。",
+            field=field,
+        )
+    return ",".join(item.strip() for item in parsed), None
+
+
+def _normalize_advanced_filter_date_param(
+    product_id: str,
+    field: str,
+    value: Any,
+) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    if value is None:
+        return None, None
+    if not isinstance(value, str) or not value.strip():
+        return None, _api_error(
+            product_id,
+            "参数错误",
+            f"{field} 必须是 YYYY-MM-DD 日期字符串。",
+            field=field,
+        )
+    normalized = value.strip()
+    try:
+        datetime.strptime(normalized, "%Y-%m-%d")
+    except ValueError:
+        return None, _api_error(
+            product_id,
+            "参数错误",
+            f"{field} 必须是有效的 YYYY-MM-DD 日期字符串。",
+            field=field,
+        )
+    return normalized, None
+
+
+def _normalize_advanced_filter_number_param(
+    product_id: str,
+    field: str,
+    value: Any,
+) -> tuple[Optional[float], Optional[Dict[str, Any]]]:
+    if value is None or value == "":
+        return None, None
+    if isinstance(value, bool):
+        value = None
+    else:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = None
+    if value is None or not math.isfinite(value) or value < 0:
+        return None, _api_error(
+            product_id,
+            "参数错误",
+            f"{field} 必须是大于等于 0 的有限数字。",
+            field=field,
+        )
+    return value, None
+
+
 def _signature(call_params: Dict[str, Any], secret_key: str) -> str:
     material = "".join(str(call_params[key]) for key in sorted(call_params)) + secret_key
     return md5(material.encode("utf-8")).hexdigest()
@@ -351,7 +447,66 @@ def _normalize_high_screen_filter(
 
 
 def _advanced_filter_flat_params(**values: Any) -> Dict[str, Any]:
-    return _drop_none(values)
+    return _drop_none({
+        key: value
+        for key, value in values.items()
+        if value is not None and value != "" and value != []
+    })
+
+
+def _normalize_advanced_filter_flat_params(
+    product_id: str,
+    values: Dict[str, Any],
+) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Normalize every legacy flat parameter before calling count/list products."""
+    normalized: Dict[str, Any] = {}
+
+    address, error = _normalize_advanced_filter_address_param(product_id, values.get("address"))
+    if error:
+        return None, error
+    if address is not None:
+        normalized["address"] = address
+
+    for field in ("operStatus", "industries", "enterpriseType", "name"):
+        value, error = _normalize_advanced_filter_string_param(product_id, field, values.get(field))
+        if error:
+            return None, error
+        if value is not None:
+            normalized[field] = value
+
+    for field in ("foundTimeGte", "foundTimeLte"):
+        value, error = _normalize_advanced_filter_date_param(product_id, field, values.get(field))
+        if error:
+            return None, error
+        if value is not None:
+            normalized[field] = value
+
+    for field in (
+        "regCapitalRmbGte",
+        "regCapitalRmbLte",
+        "totalPayAmountGte",
+        "totalPayAmountLte",
+    ):
+        value, error = _normalize_advanced_filter_number_param(product_id, field, values.get(field))
+        if error:
+            return None, error
+        if value is not None:
+            normalized[field] = value
+
+    ranges = (
+        ("foundTimeGte", "foundTimeLte"),
+        ("regCapitalRmbGte", "regCapitalRmbLte"),
+        ("totalPayAmountGte", "totalPayAmountLte"),
+    )
+    for lower, upper in ranges:
+        if lower in normalized and upper in normalized and normalized[lower] > normalized[upper]:
+            return None, _api_error(
+                product_id,
+                "参数错误",
+                f"{lower} 不能大于 {upper}。",
+                field=f"{lower}/{upper}",
+            )
+    return normalized, None
 
 
 def _validate_advanced_filter_mode(
@@ -477,18 +632,6 @@ def enterprise_get_enterprise_profile(matchKeyword: str, keywordType: Optional[s
     - keywordType: name、nameId、regNumber、socialCreditCode
     """
     return call_api(PRODUCT_IDS["enterprise_profile"], _drop_none({"matchKeyword": matchKeyword, "keywordType": keywordType}))
-
-
-@mcp.tool()
-def enterprise_get_enterprise_business_info(matchKeyword: str, keywordType: Optional[str] = None) -> dict:
-    """
-    查询企业业务相关信息，用于识别企业主营业务和产业链相关能力。
-
-    请求参数:
-    - matchKeyword: 企业名称/注册号/统一社会信用代码/企业id
-    - keywordType: name、nameId、regNumber、socialCreditCode
-    """
-    return call_api(PRODUCT_IDS["enterprise_business_info"], _drop_none({"matchKeyword": matchKeyword, "keywordType": keywordType}))
 
 
 @mcp.tool()
@@ -654,17 +797,17 @@ def supply_get_down_stream_enterprises(
 @mcp.tool()
 def advanced_filter_get_enterprise_count(
     filter: Optional[Union[str, Dict[str, Any]]] = None,
-    operStatus: Optional[str] = None,
-    address: Optional[Union[str, list]] = None,
-    industries: Optional[str] = None,
-    enterpriseType: Optional[str] = None,
-    name: Optional[str] = None,
+    operStatus: Optional[Union[str, list[str]]] = None,
+    address: Optional[Union[str, list[Any]]] = None,
+    industries: Optional[Union[str, list[str]]] = None,
+    enterpriseType: Optional[Union[str, list[str]]] = None,
+    name: Optional[Union[str, list[str]]] = None,
     foundTimeGte: Optional[str] = None,
     foundTimeLte: Optional[str] = None,
-    regCapitalRmbGte: Optional[float] = None,
-    regCapitalRmbLte: Optional[float] = None,
-    totalPayAmountGte: Optional[float] = None,
-    totalPayAmountLte: Optional[float] = None,
+    regCapitalRmbGte: Optional[Union[float, str]] = None,
+    regCapitalRmbLte: Optional[Union[float, str]] = None,
+    totalPayAmountGte: Optional[Union[float, str]] = None,
+    totalPayAmountLte: Optional[Union[float, str]] = None,
     pageIndex: int = 1,
     pageSize: int = 10,
 ) -> dict:
@@ -676,13 +819,13 @@ def advanced_filter_get_enterprise_count(
 
     请求参数:
     - filter: 完整高筛条件组，例如 {"must":[{"operStatus_v2":[{"eq":[["营业"]]}]}]}
-    - operStatus: 营业状态，例如“营业,吊销”或“!吊销”
+    - operStatus: 营业状态，例如“营业,吊销”、["营业","吊销"] 或“!吊销”
     - address: 仅扁平模式使用。上游格式是二维地区路径 JSON 字符串，例如
       [["广东省"]] 或 [["北京市"],["广东省","广州市"]]。也可直接传
       "广东省"、"广东省,深圳市" 或对应数组，MCP 会校验并转换。
-    - industries: 行业筛选条件
-    - enterpriseType: 企业类型筛选条件
-    - name: 企业名称筛选条件
+    - industries: 行业筛选条件，接受逗号分隔字符串、JSON 字符串数组或字符串数组
+    - enterpriseType: 企业类型筛选条件，输入形式同 industries
+    - name: 企业名称筛选条件，输入形式同 industries
     - foundTimeGte/foundTimeLte: 成立时间范围
     - regCapitalRmbGte/regCapitalRmbLte: 注册资本范围，单位万元
     - totalPayAmountGte/totalPayAmountLte: 实缴资本范围，单位万元
@@ -729,34 +872,30 @@ def advanced_filter_get_enterprise_count(
             return _api_error(product_id, "响应格式错误", "高筛接口返回的 total 不是整数。")
 
     product_id = PRODUCT_IDS["advanced_filter_count"]
-    normalized_address, address_error = _normalize_advanced_filter_address_param(product_id, address)
-    if address_error:
-        return address_error
-    if normalized_address is None:
-        flat_params.pop("address", None)
-    else:
-        flat_params["address"] = normalized_address
+    normalized_params, error = _normalize_advanced_filter_flat_params(product_id, flat_params)
+    if error:
+        return error
     page, error = _normalize_pagination(product_id, pageIndex, pageSize, max_page_size=10)
     if error:
         return error
-    params = {**flat_params, **(page or {})}
+    params = {**(normalized_params or {}), **(page or {})}
     return call_api(product_id, params)
 
 
 @mcp.tool()
 def advanced_filter_get_enterprise_list(
     filter: Optional[Union[str, Dict[str, Any]]] = None,
-    operStatus: Optional[str] = None,
-    address: Optional[Union[str, list]] = None,
-    industries: Optional[str] = None,
-    enterpriseType: Optional[str] = None,
-    name: Optional[str] = None,
+    operStatus: Optional[Union[str, list[str]]] = None,
+    address: Optional[Union[str, list[Any]]] = None,
+    industries: Optional[Union[str, list[str]]] = None,
+    enterpriseType: Optional[Union[str, list[str]]] = None,
+    name: Optional[Union[str, list[str]]] = None,
     foundTimeGte: Optional[str] = None,
     foundTimeLte: Optional[str] = None,
-    regCapitalRmbGte: Optional[float] = None,
-    regCapitalRmbLte: Optional[float] = None,
-    totalPayAmountGte: Optional[float] = None,
-    totalPayAmountLte: Optional[float] = None,
+    regCapitalRmbGte: Optional[Union[float, str]] = None,
+    regCapitalRmbLte: Optional[Union[float, str]] = None,
+    totalPayAmountGte: Optional[Union[float, str]] = None,
+    totalPayAmountLte: Optional[Union[float, str]] = None,
     pageIndex: int = 1,
     pageSize: int = 10,
 ) -> dict:
@@ -771,16 +910,16 @@ def advanced_filter_get_enterprise_list(
     filter 模式固定返回第一页前50条，接受 pageIndex=1 和 pageSize=10（默认）或 pageSize=50；不向上游转发分页字段。
 
     扁平模式参数:
-    - operStatus: 营业状态。多个状态用逗号分隔；排除状态使用 !，例如“营业”或“!吊销”。
+    - operStatus: 营业状态。可传逗号分隔字符串、JSON 字符串数组或字符串数组；排除状态使用 !。
     - address: 注册地区。上游要求二维地区路径 JSON 字符串；本工具同时接受以下常见输入并自动转换：
       1. 省份字符串："广东省" -> [["广东省"]]
       2. 省市路径字符串："广东省,深圳市" -> [["广东省","深圳市"]]
       3. 多地区字符串："北京市;广东省,广州市"
       4. JSON 字符串或数组：[["北京市"],["广东省","广州市"]]
       直辖市可单独写“北京市/上海市/天津市/重庆市”；其他城市必须带省份，不能只写“深圳市”。
-    - industries: 行业；多个值用逗号分隔，排除值前加 !。
-    - enterpriseType: 企业类型；多个值用逗号分隔，排除值前加 !。
-    - name: 企业名称包含/排除关键词，例如“无人机”或“汽车,!专卖店”。
+    - industries: 行业；输入形式同 operStatus，排除值前加 !。
+    - enterpriseType: 企业类型；输入形式同 operStatus，排除值前加 !。
+    - name: 企业名称包含/排除关键词；输入形式同 operStatus，例如“无人机”或 ["汽车","!专卖店"]。
     - foundTimeGte/foundTimeLte: 成立日期下限/上限，格式 YYYY-MM-DD。
     - regCapitalRmbGte/regCapitalRmbLte: 注册资本范围，单位万元。
     - totalPayAmountGte/totalPayAmountLte: 实缴资本范围，单位万元。
@@ -853,17 +992,13 @@ def advanced_filter_get_enterprise_list(
         return call_api(product_id, {"filter": filter_string})
 
     product_id = PRODUCT_IDS["advanced_filter_list"]
-    normalized_address, address_error = _normalize_advanced_filter_address_param(product_id, address)
-    if address_error:
-        return address_error
-    if normalized_address is None:
-        flat_params.pop("address", None)
-    else:
-        flat_params["address"] = normalized_address
+    normalized_params, error = _normalize_advanced_filter_flat_params(product_id, flat_params)
+    if error:
+        return error
     page, error = _normalize_pagination(product_id, pageIndex, pageSize, max_page_size=10)
     if error:
         return error
-    params = {**flat_params, **(page or {})}
+    params = {**(normalized_params or {}), **(page or {})}
     return call_api(product_id, params)
 
 

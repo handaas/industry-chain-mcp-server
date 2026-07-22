@@ -18,7 +18,7 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         payload = json.loads(response.body)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["mcp_path"], "/mcp")
-        self.assertGreaterEqual(payload["tool_count"], 24)
+        self.assertEqual(payload["tool_count"], 23)
         self.assertIsInstance(payload["credentials_configured"], bool)
         self.assertEqual(payload["ready"], payload["credentials_configured"])
         self.assertNotIn("secret", response.body.decode("utf-8").lower())
@@ -41,6 +41,38 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
         }
         self.assertIn("string", address_types)
         self.assertIn("array", address_types)
+
+        for field in ("operStatus", "industries", "enterpriseType", "name"):
+            field_types = {
+                option.get("type")
+                for option in tool.inputSchema["properties"][field]["anyOf"]
+            }
+            self.assertIn("string", field_types)
+            self.assertIn("array", field_types)
+
+        for field in (
+            "regCapitalRmbGte",
+            "regCapitalRmbLte",
+            "totalPayAmountGte",
+            "totalPayAmountLte",
+        ):
+            field_types = {
+                option.get("type")
+                for option in tool.inputSchema["properties"][field]["anyOf"]
+            }
+            self.assertIn("number", field_types)
+            self.assertIn("string", field_types)
+
+    def test_delisted_business_info_product_and_tool_are_removed(self):
+        tools = asyncio.run(server.mcp.list_tools())
+        tool_names = {tool.name for tool in tools}
+
+        self.assertEqual(len(tools), 23)
+        self.assertEqual(len(server.PRODUCT_IDS), 24)
+        self.assertNotIn("enterprise_get_enterprise_business_info", tool_names)
+        self.assertNotIn("enterprise_business_info", server.PRODUCT_IDS)
+        self.assertNotIn("enterprise_business_info", server.PRODUCT_NAMES)
+        self.assertNotIn("66e55613ae988a28c6db9259", server.PRODUCT_IDS.values())
 
     def test_high_screen_resources_expose_catalog_field_usage_and_options(self):
         resources = asyncio.run(server.mcp.list_resources())
@@ -156,15 +188,15 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
             server.SECRET_ID = "secret-id"
             server.SECRET_KEY = "secret-key"
             server.requests.post = lambda *args, **kwargs: FakeResponse()
-            result = server.call_api(server.PRODUCT_IDS["enterprise_business_info"], {"matchKeyword": "广州探迹科技有限公司"})
+            result = server.call_api(server.PRODUCT_IDS["enterprise_profile"], {"matchKeyword": "广州探迹科技有限公司"})
         finally:
             server.INTEGRATOR_ID, server.SECRET_ID, server.SECRET_KEY = original_credentials
             server.requests.post = original_post
 
         self.assertEqual(result["error"], "产品不存在")
-        self.assertEqual(result["product_key"], "enterprise_business_info")
-        self.assertEqual(result["product_name"], "企业业务信息查询")
-        self.assertEqual(result["product_id"], "66e55613ae988a28c6db9259")
+        self.assertEqual(result["product_key"], "enterprise_profile")
+        self.assertEqual(result["product_name"], "企业简介查询")
+        self.assertEqual(result["product_id"], "6682b0b370f56cb7d77701e0")
 
     def test_bid_search_keeps_json_string_params(self):
         captured = {}
@@ -320,6 +352,99 @@ class ExistingInterfaceWrapperTests(unittest.TestCase):
             captured[1][1]["address"],
             '[["广东省","深圳市"],["江苏省","南京市"]]',
         )
+
+    def test_advanced_filter_list_normalizes_every_flat_parameter_for_upstream(self):
+        captured = {}
+        original = server.call_api
+
+        def fake_call_api(product_id, params=None):
+            captured["product_id"] = product_id
+            captured["params"] = params or {}
+            return {"resultList": [], "total": 0}
+
+        try:
+            server.call_api = fake_call_api
+            result = server.advanced_filter_get_enterprise_list(
+                operStatus=["营业", "!吊销"],
+                address="广东省",
+                industries='["制造业", "!零售业"]',
+                enterpriseType=["民营", "!个体户"],
+                name=["汽车", "!专卖店"],
+                foundTimeGte="2020-01-01",
+                foundTimeLte="2025-12-31",
+                regCapitalRmbGte="2000",
+                regCapitalRmbLte=5000,
+                totalPayAmountGte="100.5",
+                totalPayAmountLte=1000,
+            )
+        finally:
+            server.call_api = original
+
+        self.assertEqual(result, {"resultList": [], "total": 0})
+        self.assertEqual(captured["product_id"], server.PRODUCT_IDS["advanced_filter_list"])
+        self.assertEqual(captured["params"]["operStatus"], "营业,!吊销")
+        self.assertEqual(captured["params"]["address"], '[["广东省"]]')
+        self.assertEqual(captured["params"]["industries"], "制造业,!零售业")
+        self.assertEqual(captured["params"]["enterpriseType"], "民营,!个体户")
+        self.assertEqual(captured["params"]["name"], "汽车,!专卖店")
+        self.assertEqual(captured["params"]["foundTimeGte"], "2020-01-01")
+        self.assertEqual(captured["params"]["foundTimeLte"], "2025-12-31")
+        self.assertEqual(captured["params"]["regCapitalRmbGte"], 2000.0)
+        self.assertEqual(captured["params"]["regCapitalRmbLte"], 5000.0)
+        self.assertEqual(captured["params"]["totalPayAmountGte"], 100.5)
+        self.assertEqual(captured["params"]["totalPayAmountLte"], 1000.0)
+
+    def test_advanced_filter_count_uses_the_same_flat_parameter_adaptation(self):
+        captured = {}
+        original = server.call_api
+
+        def fake_call_api(product_id, params=None):
+            captured["product_id"] = product_id
+            captured["params"] = params or {}
+            return {"total": 3}
+
+        try:
+            server.call_api = fake_call_api
+            result = server.advanced_filter_get_enterprise_count(
+                operStatus='["营业", "筹建"]',
+                name=["机器人", "!培训"],
+                regCapitalRmbGte="1000.25",
+            )
+        finally:
+            server.call_api = original
+
+        self.assertEqual(result, {"total": 3})
+        self.assertEqual(captured["product_id"], server.PRODUCT_IDS["advanced_filter_count"])
+        self.assertEqual(captured["params"]["operStatus"], "营业,筹建")
+        self.assertEqual(captured["params"]["name"], "机器人,!培训")
+        self.assertEqual(captured["params"]["regCapitalRmbGte"], 1000.25)
+
+    def test_advanced_filter_rejects_invalid_flat_parameters_without_upstream_call(self):
+        original = server.call_api
+        try:
+            server.call_api = lambda *args, **kwargs: self.fail("upstream must not be called")
+            invalid_values = server.advanced_filter_get_enterprise_list(industries=["制造业", 1])
+            invalid_date = server.advanced_filter_get_enterprise_list(foundTimeGte="2025-02-30")
+            invalid_number = server.advanced_filter_get_enterprise_count(regCapitalRmbGte="many")
+            reversed_dates = server.advanced_filter_get_enterprise_list(
+                foundTimeGte="2025-01-01",
+                foundTimeLte="2024-01-01",
+            )
+            reversed_range = server.advanced_filter_get_enterprise_count(
+                totalPayAmountGte=200,
+                totalPayAmountLte=100,
+            )
+        finally:
+            server.call_api = original
+
+        for result in (invalid_values, invalid_date, invalid_number, reversed_dates, reversed_range):
+            self.assertEqual(result["error"], "参数错误")
+            self.assertTrue(result["product_key"].startswith("advanced_filter_"))
+        self.assertEqual(invalid_values["field"], "industries")
+        self.assertEqual(invalid_date["field"], "foundTimeGte")
+        self.assertEqual(invalid_number["field"], "regCapitalRmbGte")
+        self.assertEqual(reversed_dates["field"], "foundTimeGte/foundTimeLte")
+        self.assertEqual(reversed_range["field"], "totalPayAmountGte/totalPayAmountLte")
 
     def test_advanced_filter_list_rejects_city_without_province(self):
         original = server.call_api

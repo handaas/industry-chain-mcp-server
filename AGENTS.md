@@ -25,7 +25,7 @@ Maintain an open-source MCP server that exposes existing HandaaS data products f
 
 ## Tool and product registry
 
-`PRODUCT_IDS` and `PRODUCT_NAMES` in `server/mcp_server.py` are the source of truth. The current service exposes 24 MCP tools backed by 25 HandaaS products in these groups:
+`PRODUCT_IDS` and `PRODUCT_NAMES` in `server/mcp_server.py` are the source of truth. The current service exposes 23 MCP tools backed by 24 HandaaS products in these groups:
 
 - Enterprise discovery and profile
 - Supply-chain downstream products and enterprises
@@ -60,6 +60,7 @@ Do not expose arbitrary `product_id` execution as a generic MCP tool.
 - Accept multiple fields in one `must` / `should` condition object and normalize them, in insertion order, into separate single-field conditions before validation; this is a safe compatibility correction for common LLM output.
 - Full high-screen condition mode returns the total and the fixed first 50 rows. Accept `pageIndex=1` with either the tool default `pageSize=10` or the explicit fixed-result sentinel `pageSize=50`, never forward those paging fields, and reject all other paging values. Legacy flat list mode remains paginated up to 500 rows.
 - Legacy flat `advanced_filter_get_enterprise_list` / `advanced_filter_get_enterprise_count` addresses use compact list-of-paths JSON at the HandaaS boundary, e.g. `[["广东省"]]`. MCP clients may pass a simple region string, province/city path string, JSON string, or array; validate against bundled address options and normalize once before `call_api`.
+- Both legacy flat advanced-filter tools normalize every parameter before `call_api`: multi-value fields accept comma-delimited strings, JSON string arrays, or string arrays; dates must be valid `YYYY-MM-DD`; non-negative numeric fields accept JSON numbers or numeric strings; lower bounds must not exceed upper bounds.
 - Invalid negative/zero pagination returns a structured `参数错误` without calling upstream.
 - `bid_bigdata_bid_search.biddingType` and `biddingRegion` accept JSON arrays or legal JSON strings and are normalized before upstream calls.
 - `policy_bigdata_policy_search.address` accepts list/list JSON or simple region strings and is normalized to HandaaS list-of-list JSON.
@@ -110,7 +111,7 @@ INDUSTRY_CHAIN_MCP_URL=http://127.0.0.1:8023/mcp \
   python ../industry-chain-processing-skill/industry-chain-processing/scripts/mcp_client.py ping
 ```
 
-Expected tool count is currently 24. No tool name should start with a custom workflow prefix such as `industry_chain_`.
+Expected tool count is currently 23. No tool name should start with a custom workflow prefix such as `industry_chain_`.
 
 ## Repository layout
 
